@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import timedelta
+from uuid import uuid4
 from pathlib import Path
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
@@ -16,8 +17,6 @@ from manageengine_client import ManageEngineClient
 from manageengine_mapper import build_manageengine_payload, policy_for_severity
 from db_models import NotificationDelivery, ProcessingLog, ProcessingStatus, utc_now
 from repositories import (
-    ClaimResult,
-    DedupeClaimRepository,
     NotificationDeliveryRepository,
     ProcessingLogRepository,
     SmtpRateLimiter,
@@ -76,9 +75,8 @@ class FindingProcessor:
         """Initialize clients, repositories, rate limiting, and product mapping."""
         self.settings = settings
         self.processing_logs = ProcessingLogRepository(db)
-        self.dedupe_claims = DedupeClaimRepository(db)
         self.notification_deliveries = NotificationDeliveryRepository(db)
-        self.worker_id = self.dedupe_claims.new_worker_id()
+        self.worker_id = str(uuid4())
         self.rate_limiter = SmtpRateLimiter(
             SmtpRateLimitRepository(db),
             settings.smtp_max_emails_per_minute,
@@ -180,50 +178,11 @@ class FindingProcessor:
         dedupe_key = build_dedupe_key(finding)
         sla_policy = policy_for_severity(finding.severity)
         self._log_missing_finding_fields(finding, dedupe_key)
-        claim_result = self.dedupe_claims.acquire(
+        self._process_claimed_finding(
+            finding=finding,
             dedupe_key=dedupe_key,
-            finding_id=finding.finding_id,
-            worker_id=self.worker_id,
-            lease_seconds=self.settings.processing_claim_ttl_seconds,
+            sla_policy=sla_policy,
         )
-        if claim_result == ClaimResult.BUSY:
-            logger.info(
-                "Finding processing skipped because another worker owns the lease",
-                extra={
-                    "finding_id": finding.finding_id,
-                    "dedupe_key": dedupe_key,
-                },
-            )
-            return
-        if claim_result == ClaimResult.DUPLICATE:
-            self.processing_logs.mark_seen(
-                finding_id=finding.finding_id,
-                dedupe_key=dedupe_key,
-                priority=sla_policy.priority,
-                sla_target=sla_policy.target,
-                sla_due_at=sla_policy.due_at,
-            )
-            self.processing_logs.mark_skipped(
-                finding_id=finding.finding_id,
-                error_message="Duplicate issue skipped because dedupe_key is owned by another finding",
-                dedupe_key=dedupe_key,
-                priority=sla_policy.priority,
-                sla_target=sla_policy.target,
-                sla_due_at=sla_policy.due_at,
-            )
-            return
-
-        try:
-            self._process_claimed_finding(
-                finding=finding,
-                dedupe_key=dedupe_key,
-                sla_policy=sla_policy,
-            )
-        finally:
-            self.dedupe_claims.release(
-                dedupe_key=dedupe_key,
-                worker_id=self.worker_id,
-            )
 
     def _process_claimed_finding(
         self,
@@ -232,7 +191,7 @@ class FindingProcessor:
         dedupe_key: str,
         sla_policy: SlaPolicy,
     ) -> None:
-        """Process a finding after this worker has acquired its dedupe lease."""
+        """Process a finding after checking existing processing logs."""
         existing = self.processing_logs.get_by_finding_id(finding.finding_id)
         dedupe_duplicate = self.processing_logs.get_sent_or_queued_by_dedupe_key(
             dedupe_key
@@ -694,7 +653,7 @@ class FindingProcessor:
             if not self.notification_deliveries.acquire(
                 delivery_id=delivery.id,
                 worker_id=self.worker_id,
-                lease_seconds=self.settings.processing_claim_ttl_seconds,
+                lease_seconds=self.settings.notification_lease_ttl_seconds,
             ):
                 continue
             self._deliver_notification(delivery)

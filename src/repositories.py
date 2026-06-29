@@ -1,15 +1,11 @@
 """Persist dedupe, delivery queue, processing, and SMTP audit state."""
 
-import enum
-from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, insert, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from db_models import (
-    DedupeClaim,
     NotificationDelivery,
     NotificationStatus,
     ProcessingLog,
@@ -18,23 +14,6 @@ from db_models import (
     utc_now,
 )
 from schemas import EmailPayload
-
-
-class ClaimResult(str, enum.Enum):
-    """Outcome of attempting to own one logical finding for processing."""
-
-    ACQUIRED = "ACQUIRED"
-    BUSY = "BUSY"
-    DUPLICATE = "DUPLICATE"
-
-
-def _as_utc(value: datetime | None) -> datetime | None:
-    """Normalize database timestamps for SQLite and PostgreSQL comparisons."""
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 class ProcessingLogRepository:
@@ -331,103 +310,6 @@ class ProcessingLogRepository:
         self.db.refresh(record)
         return record
 
-
-class DedupeClaimRepository:
-    """Atomically lease logical finding keys across scheduler processes."""
-
-    def __init__(self, db: Session):
-        self.db = db
-
-    @staticmethod
-    def new_worker_id() -> str:
-        """Return a compact worker identity suitable for a database lease."""
-        return str(uuid4())
-
-    def acquire(
-        self,
-        *,
-        dedupe_key: str,
-        finding_id: int,
-        worker_id: str,
-        lease_seconds: int,
-    ) -> ClaimResult:
-        """Claim a key, reject logical duplicates, or report another active worker."""
-        now = utc_now()
-        lease_expires_at = now + timedelta(seconds=lease_seconds)
-        created = False
-        try:
-            with self.db.begin_nested():
-                self.db.execute(
-                    insert(DedupeClaim).values(
-                        dedupe_key=dedupe_key,
-                        finding_id=finding_id,
-                        lease_owner=worker_id,
-                        lease_expires_at=lease_expires_at,
-                    )
-                )
-                created = True
-        except IntegrityError:
-            pass
-
-        if created:
-            self.db.commit()
-            return ClaimResult.ACQUIRED
-
-        claim = self.db.get(DedupeClaim, dedupe_key)
-        if claim is None:
-            self.db.rollback()
-            return ClaimResult.BUSY
-        lease_expires_at_value = _as_utc(claim.lease_expires_at)
-        lease_active = (
-            claim.lease_owner is not None
-            and lease_expires_at_value is not None
-            and lease_expires_at_value > now
-        )
-        if lease_active:
-            return ClaimResult.BUSY
-
-        if claim.finding_id != finding_id:
-            owner = self.db.scalar(
-                select(ProcessingLog).where(
-                    ProcessingLog.finding_id == claim.finding_id
-                )
-            )
-            if owner and owner.status in (
-                ProcessingStatus.PENDING,
-                ProcessingStatus.SENT,
-                ProcessingStatus.RATE_LIMITED,
-            ):
-                return ClaimResult.DUPLICATE
-
-        result = self.db.execute(
-            update(DedupeClaim)
-            .where(DedupeClaim.dedupe_key == dedupe_key)
-            .where(
-                or_(
-                    DedupeClaim.lease_owner.is_(None),
-                    DedupeClaim.lease_expires_at.is_(None),
-                    DedupeClaim.lease_expires_at <= now,
-                )
-            )
-            .values(
-                finding_id=finding_id,
-                lease_owner=worker_id,
-                lease_expires_at=lease_expires_at,
-                updated_at=now,
-            )
-        )
-        self.db.commit()
-        return ClaimResult.ACQUIRED if result.rowcount == 1 else ClaimResult.BUSY
-
-    def release(self, *, dedupe_key: str, worker_id: str) -> None:
-        """Release a lease only when it is still owned by this worker."""
-        self.db.execute(
-            update(DedupeClaim)
-            .where(DedupeClaim.dedupe_key == dedupe_key)
-            .where(DedupeClaim.lease_owner == worker_id)
-            .values(lease_owner=None, lease_expires_at=None, updated_at=utc_now())
-        )
-        self.db.commit()
 
 
 class NotificationDeliveryRepository:

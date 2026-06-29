@@ -18,7 +18,6 @@ from db_models import (
     SmtpSendEvent,
 )
 from processor import FindingProcessor
-from repositories import ClaimResult, DedupeClaimRepository
 from schemas import (
     DefectDojoFinding,
     EmailPayload,
@@ -127,24 +126,10 @@ def test_process_finding_api_unknown_response_is_failed():
     assert "not confirmed" in record.error_message
 
 
-def test_dedupe_claim_blocks_concurrent_worker_and_logical_duplicate():
+def test_processing_log_dedupe_key_identifies_sent_duplicate():
     db = build_session()
-    claims = DedupeClaimRepository(db)
+    processor = FindingProcessor(build_settings(), db)
 
-    assert claims.acquire(
-        dedupe_key="dd:claim",
-        finding_id=100,
-        worker_id="worker-a",
-        lease_seconds=300,
-    ) == ClaimResult.ACQUIRED
-    assert claims.acquire(
-        dedupe_key="dd:claim",
-        finding_id=100,
-        worker_id="worker-b",
-        lease_seconds=300,
-    ) == ClaimResult.BUSY
-
-    claims.release(dedupe_key="dd:claim", worker_id="worker-a")
     db.add(
         ProcessingLog(
             finding_id=100,
@@ -154,12 +139,11 @@ def test_dedupe_claim_blocks_concurrent_worker_and_logical_duplicate():
     )
     db.commit()
 
-    assert claims.acquire(
-        dedupe_key="dd:claim",
-        finding_id=200,
-        worker_id="worker-b",
-        lease_seconds=300,
-    ) == ClaimResult.DUPLICATE
+    duplicate = processor.processing_logs.get_sent_or_queued_by_dedupe_key("dd:claim")
+
+    assert duplicate is not None
+    assert duplicate.finding_id == 100
+    assert duplicate.status == ProcessingStatus.SENT
 
 
 def test_process_finding_skips_duplicate_dedupe_key_after_ticket_created():

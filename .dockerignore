@@ -20,3 +20,4 @@ tests
 *.key
 *.p12
 *.pfx
+.github

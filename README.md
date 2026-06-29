@@ -77,8 +77,7 @@ Duplicate prevention uses:
 
 - `finding_id` for the same DefectDojo record.
 - `dedupe_key` for logically equivalent findings.
-- A database lease to prevent multiple containers from processing the same
-  logical finding concurrently.
+- This deployment assumes a single app container and single scheduler.
 
 SMTP retry does not use long `sleep()` calls. A temporary failure is persisted:
 
@@ -86,7 +85,7 @@ SMTP retry does not use long `sleep()` calls. A temporary failure is persisted:
 SMTP failure
 -> increment retry_count
 -> store next_attempt_at
--> release current worker
+-> leave the current scheduler cycle
 -> retry during the first scheduler cycle after next_attempt_at
 ```
 
@@ -107,7 +106,6 @@ retried at the next five-minute cycle.
 |---|---|
 | `processing_logs` | Latest finding, ticket, status, payload, and retry state |
 | `smtp_send_events` | Immutable successful-send audit and SMTP rate-limit data |
-| `dedupe_claims` | Atomic processing leases across workers/containers |
 | `notification_deliveries` | Per-recipient notification queue and retry state |
 | `alembic_version` | Current database migration revision |
 
@@ -116,6 +114,7 @@ Database schema is managed by Alembic:
 ```text
 20260625_0001_baseline
 -> 20260625_0002_delivery_queue
+-> 20260629_0003_remove_dedupe_claims
 ```
 
 FastAPI startup does not create or alter tables.
@@ -126,7 +125,7 @@ FastAPI startup does not create or alter tables.
 src/
   main.py                  FastAPI application, logging, lifecycle
   config.py                Validated environment settings
-  scheduler.py             Five-minute polling and scheduler lease
+  scheduler.py             Five-minute polling loop
   processor.py             Main orchestration flow
   defectdojo_client.py     DefectDojo API client and normalization
   dedupe.py                Stable SHA-256 dedupe fingerprint
@@ -363,7 +362,6 @@ docker compose exec -T postgres \
   psql -U devsecops -d devsecops -c "
   truncate table
     notification_deliveries,
-    dedupe_claims,
     smtp_send_events,
     processing_logs
   restart identity;
@@ -377,7 +375,7 @@ Do not truncate `alembic_version`.
 Prerequisites:
 
 - PostgreSQL is running.
-- Migrations are at `20260625_0002`.
+- Migrations are at `20260629_0003`.
 - The scheduler app is stopped.
 - The product mapping contains approved recipients.
 - The target product has at least one Active + Verified finding.
@@ -471,18 +469,20 @@ docker compose exec -T postgres \
   "
 ```
 
-Dedupe leases:
+Notification queue:
 
 ```bash
 docker compose exec -T postgres \
   psql -U devsecops -d devsecops -c "
   select
-    dedupe_key,
+    id,
     finding_id,
-    lease_owner,
-    lease_expires_at,
-    updated_at
-  from dedupe_claims
+    recipient_email,
+    status,
+    retry_count,
+    next_attempt_at,
+    sent_at
+  from notification_deliveries
   order by updated_at desc;
   "
 ```
@@ -542,7 +542,7 @@ The application container:
 - Enables `no-new-privileges`.
 - Includes an HTTP healthcheck.
 
-PostgreSQL container port `5432` is bound to local host port `5433`.
+PostgreSQL container port `5432` is bound to local host port `5432`.
 
 For production, replace default database credentials, use a managed secret
 store, enable valid TLS certificates, and do not expose PostgreSQL publicly.

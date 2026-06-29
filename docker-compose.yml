@@ -50,7 +50,7 @@ services:
       POSTGRES_USER: devsecops
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devsecops}
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:5432:5432"
     restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data

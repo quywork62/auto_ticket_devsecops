@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = Field(True, alias="SMTP_USE_TLS")
     smtp_timeout_seconds: int = Field(30, alias="SMTP_TIMEOUT_SECONDS")
     scheduler_interval_seconds: int = Field(300, alias="SCHEDULER_INTERVAL_SECONDS")
-    processing_claim_ttl_seconds: int = Field(
-        1800, alias="PROCESSING_CLAIM_TTL_SECONDS"
+    notification_lease_ttl_seconds: int = Field(
+        1800, alias="NOTIFICATION_LEASE_TTL_SECONDS"
     )
 
     smtp_max_emails_per_minute: int = Field(30, alias="SMTP_MAX_EMAILS_PER_MINUTE")

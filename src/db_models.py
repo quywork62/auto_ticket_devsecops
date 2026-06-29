@@ -74,24 +74,6 @@ class ProcessingLog(Base):
     )
 
 
-class DedupeClaim(Base):
-    """Own one logical finding key and serialize processing across workers."""
-
-    __tablename__ = "dedupe_claims"
-
-    dedupe_key: Mapped[str] = mapped_column(String(80), primary_key=True)
-    finding_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
-    )
-
 
 class NotificationDelivery(Base):
     """Persist one notification recipient so delivery can be retried safely."""

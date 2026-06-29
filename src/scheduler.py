@@ -8,7 +8,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config import Settings
 from database import get_session_factory
 from processor import FindingProcessor
-from repositories import ClaimResult, DedupeClaimRepository
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,6 @@ class AppScheduler:
         """Create a UTC scheduler using the supplied application settings."""
         self.settings = settings
         self.scheduler = BackgroundScheduler(timezone="UTC")
-        self.worker_id = DedupeClaimRepository.new_worker_id()
 
     def start(self) -> None:
         """Register the polling job and run the first cycle immediately."""
@@ -51,25 +49,8 @@ class AppScheduler:
     def _run_cycle(self) -> None:
         """Run one processor cycle with an isolated database session."""
         db = get_session_factory()()
-        claims = DedupeClaimRepository(db)
-        acquired = False
         try:
-            result = claims.acquire(
-                dedupe_key="scheduler:defectdojo-polling",
-                finding_id=0,
-                worker_id=self.worker_id,
-                lease_seconds=self.settings.processing_claim_ttl_seconds,
-            )
-            if result != ClaimResult.ACQUIRED:
-                logger.info("Scheduler cycle skipped because another instance is active")
-                return
-            acquired = True
             processor = FindingProcessor(self.settings, db)
             processor.process_scheduler_cycle()
         finally:
-            if acquired:
-                claims.release(
-                    dedupe_key="scheduler:defectdojo-polling",
-                    worker_id=self.worker_id,
-                )
             db.close()
