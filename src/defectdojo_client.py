@@ -21,15 +21,50 @@ class DefectDojoClient:
         self._engagement_cache: dict[int, dict] = {}
         self._product_cache: dict[int, dict] = {}
 
-    def fetch_active_verified_findings(self) -> list[DefectDojoFinding]:
-        """Fetch every active and verified finding across API pages."""
+    def fetch_active_verified_findings(
+        self, product_names: list[str] | None = None
+    ) -> list[DefectDojoFinding]:
+        """Fetch active and verified findings for configured product names only."""
+        normalized_products = self._normalize_product_names(product_names)
+        if not normalized_products:
+            logger.warning("No DefectDojo product filters configured; skipping fetch")
+            return []
+
+        findings: list[DefectDojoFinding] = []
+        seen_finding_ids: set[int] = set()
+
+        for product_name in normalized_products:
+            product_id = self._find_product_id_by_name(product_name)
+            if product_id is None:
+                logger.warning(
+                    "Configured DefectDojo product not found; skipping product",
+                    extra={"product": product_name},
+                )
+                continue
+
+            for finding in self._fetch_active_verified_findings_for_product(product_id):
+                if finding.finding_id in seen_finding_ids:
+                    continue
+                seen_finding_ids.add(finding.finding_id)
+                findings.append(finding)
+
+        logger.debug(
+            "DefectDojo findings fetched",
+            extra={"finding_count": len(findings)},
+        )
+        return findings
+
+    def _fetch_active_verified_findings_for_product(
+        self, product_id: int
+    ) -> list[DefectDojoFinding]:
+        """Fetch active and verified finding pages for one DefectDojo product."""
         findings: list[DefectDojoFinding] = []
         limit = self.settings.defectdojo_findings_limit
         offset = 0
         next_url: str | None = self._findings_url()
 
         while next_url:
-            logger.info("DefectDojo API call started")
+            logger.debug("DefectDojo findings page request started")
             response = requests.get(
                 next_url,
                 headers=self._headers(),
@@ -39,6 +74,7 @@ class DefectDojoClient:
                         "verified": "true",
                         "limit": limit,
                         "offset": offset,
+                        "test__engagement__product": product_id,
                     }
                     if "?" not in next_url
                     else None
@@ -51,14 +87,6 @@ class DefectDojoClient:
             for raw_finding in payload.get("results", []):
                 finding = self._map_finding(raw_finding)
                 findings.append(finding)
-                logger.info(
-                    "Finding fetched",
-                    extra={
-                        "finding_id": finding.finding_id,
-                        "product": finding.product,
-                        "severity": finding.severity,
-                    },
-                )
 
             next_url = payload.get("next")
             if next_url:
@@ -87,6 +115,40 @@ class DefectDojoClient:
     def _api_url(self, path: str) -> str:
         """Join an API-relative path to the configured DefectDojo base URL."""
         return urljoin(self.settings.defectdojo_base_url + "/", path.lstrip("/"))
+
+    def _products_url(self) -> str:
+        """Return the canonical products endpoint."""
+        return urljoin(self.settings.defectdojo_base_url + "/", "api/v2/products/")
+
+    def _normalize_product_names(self, product_names: list[str] | None) -> list[str]:
+        """Return unique non-empty product names preserving input order."""
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for product_name in product_names or []:
+            clean_name = product_name.strip()
+            normalized_name = clean_name.lower()
+            if not clean_name or normalized_name in seen:
+                continue
+            seen.add(normalized_name)
+            normalized.append(clean_name)
+        return normalized
+
+    def _find_product_id_by_name(self, product_name: str) -> int | None:
+        """Resolve a DefectDojo product ID by exact product name."""
+        response = requests.get(
+            self._products_url(),
+            headers=self._headers(),
+            params={"name": product_name, "limit": 25},
+            timeout=self.settings.defectdojo_request_timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for product in payload.get("results", []):
+            if str(product.get("name", "")).strip().lower() == product_name.lower():
+                product_id = product.get("id")
+                if isinstance(product_id, int):
+                    return product_id
+        return None
 
     def _get_json(self, path: str) -> dict:
         """GET one DefectDojo resource and return its decoded JSON object."""
@@ -148,7 +210,7 @@ class DefectDojoClient:
             elif isinstance(endpoint, str):
                 value = endpoint
             else:
-                logger.warning(
+                logger.debug(
                     "Skipping unsupported DefectDojo endpoint value",
                     extra={"endpoint_type": type(endpoint).__name__},
                 )

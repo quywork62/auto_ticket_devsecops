@@ -50,33 +50,6 @@ class Settings(BaseSettings):
         2, alias="SMTP_RETRY_BACKOFF_MULTIPLIER"
     )
 
-    manageengine_delivery_mode: str = Field(
-        "email_fetch", alias="MANAGEENGINE_DELIVERY_MODE"
-    )
-    manageengine_dry_run: bool = Field(True, alias="MANAGEENGINE_DRY_RUN")
-    manageengine_base_url: str | None = Field(None, alias="MANAGEENGINE_BASE_URL")
-    manageengine_public_url: str | None = Field(None, alias="MANAGEENGINE_PUBLIC_URL")
-    manageengine_auth_token: str | None = Field(None, alias="MANAGEENGINE_AUTH_TOKEN")
-    manageengine_request_timeout_seconds: int = Field(
-        30, alias="MANAGEENGINE_REQUEST_TIMEOUT_SECONDS"
-    )
-    manageengine_verify_ssl: bool = Field(True, alias="MANAGEENGINE_VERIFY_SSL")
-    manageengine_requester_name: str | None = Field(
-        "DevSecOps Automation", alias="MANAGEENGINE_REQUESTER_NAME"
-    )
-    manageengine_requester_email: str | None = Field(
-        None, alias="MANAGEENGINE_REQUESTER_EMAIL"
-    )
-    manageengine_default_group: str | None = Field(
-        None, alias="MANAGEENGINE_DEFAULT_GROUP"
-    )
-    manageengine_default_category: str | None = Field(
-        "Security", alias="MANAGEENGINE_DEFAULT_CATEGORY"
-    )
-    manageengine_default_subcategory: str | None = Field(
-        "Vulnerability", alias="MANAGEENGINE_DEFAULT_SUBCATEGORY"
-    )
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -89,34 +62,6 @@ class Settings(BaseSettings):
     def strip_trailing_slash(cls, value: str) -> str:
         """Normalize the DefectDojo base URL for safe URL joining."""
         return value.rstrip("/")
-
-    @field_validator("manageengine_base_url")
-    @classmethod
-    def strip_manageengine_trailing_slash(cls, value: str | None) -> str | None:
-        """Normalize the internal ManageEngine base URL when configured."""
-        if value is None:
-            return None
-        return value.rstrip("/")
-
-    @field_validator("manageengine_public_url")
-    @classmethod
-    def strip_manageengine_public_trailing_slash(cls, value: str | None) -> str | None:
-        """Normalize the public ManageEngine URL rendered in email content."""
-        if value is None:
-            return None
-        return value.rstrip("/")
-
-    @field_validator("manageengine_delivery_mode")
-    @classmethod
-    def validate_manageengine_delivery_mode(cls, value: str) -> str:
-        """Accept only the supported email-fetch and direct-API modes."""
-        normalized = value.strip().lower()
-        allowed_modes = {"email_fetch", "api"}
-        if normalized not in allowed_modes:
-            raise ValueError(
-                "MANAGEENGINE_DELIVERY_MODE must be one of: email_fetch, api"
-            )
-        return normalized
 
     @field_validator("project_email_mapping_json", mode="before")
     @classmethod

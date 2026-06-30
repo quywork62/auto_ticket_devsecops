@@ -35,7 +35,7 @@ class NotificationStatus(str, enum.Enum):
 
 
 class ProcessingLog(Base):
-    """Store the latest processing and ticket state for each finding."""
+    """Store the latest processing state for each DefectDojo finding."""
 
     __tablename__ = "processing_logs"
     __table_args__ = (UniqueConstraint("finding_id", name="uq_processing_logs_finding_id"),)
@@ -43,17 +43,7 @@ class ProcessingLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     finding_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
-    ticket_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    ticket_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    seen_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    priority: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    sla_target: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    sla_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    recipient_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     email_subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
-    email_html_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[ProcessingStatus] = mapped_column(
         Enum(ProcessingStatus, name="processing_status"),
         default=ProcessingStatus.PENDING,
@@ -61,9 +51,6 @@ class ProcessingLog(Base):
         index=True,
     )
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_attempt_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -72,7 +59,6 @@ class ProcessingLog(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
-
 
 
 class NotificationDelivery(Base):
@@ -94,7 +80,6 @@ class NotificationDelivery(Base):
     cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_subject: Mapped[str] = mapped_column(String(500), nullable=False)
     email_body: Mapped[str] = mapped_column(Text, nullable=False)
-    email_html_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[NotificationStatus] = mapped_column(
         Enum(NotificationStatus, name="notification_status"),
         default=NotificationStatus.PENDING,
@@ -105,31 +90,10 @@ class NotificationDelivery(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
     )
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
-    )
-
-
-class SmtpSendEvent(Base):
-    """Store one immutable audit row for every successful SMTP send."""
-
-    __tablename__ = "smtp_send_events"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    finding_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    recipient_email: Mapped[str] = mapped_column(String(320), nullable=False)
-    cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
-    flow_type: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
-    delivery_mode: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

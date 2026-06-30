@@ -4,7 +4,6 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 requests==2.34.2
 SQLAlchemy==2.0.51
-alembic==1.18.4
 psycopg[binary]==3.3.4
 APScheduler==3.11.2
 python-dotenv==1.2.2

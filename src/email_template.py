@@ -1,4 +1,4 @@
-"""Build safe plain-text and HTML ticket content for different finding types."""
+"""Build safe plain-text and HTML notification email content."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,12 +11,13 @@ from schemas import DefectDojoFinding, SlaPolicy, TicketAction
 
 MAX_EMAIL_SUBJECT_LENGTH = 200
 EMAIL_SUBJECT_ELLIPSIS = "....."
+DEFAULT_EMAIL_SUBJECT_PREFIX = "VJA-DEVSECOPS"
 SUPPORT_TEAM_NAME = "DevSecOps Team"
 
 
 @dataclass(frozen=True)
 class TicketContent:
-    """Rendered ticket content and routing metadata shared by both modes."""
+    """Rendered notification content and audit metadata."""
 
     finding_id: int
     subject: str
@@ -27,17 +28,26 @@ class TicketContent:
     priority: str
     sla_target: str
     sla_due_at: str
-    group: str
-    category: str
-    subcategory: str
 
 
-def build_subject(finding: DefectDojoFinding) -> str:
+def build_subject(
+    finding: DefectDojoFinding,
+    *,
+    subject_prefix: str | None = None,
+    subject_product_name: str | None = None,
+) -> str:
     """Build a redacted email subject capped at the configured length."""
-    project_name = redact_secrets(finding.product or "Unknown Project")
+    prefix = redact_secrets(
+        _non_empty_text(subject_prefix) or DEFAULT_EMAIL_SUBJECT_PREFIX
+    )
+    project_name = redact_secrets(
+        _non_empty_text(subject_product_name)
+        or _non_empty_text(finding.product)
+        or "Unknown Project"
+    )
     title = _redact_contextual_text(finding, finding.title)
     subject = (
-        f"[VJA-DEVSECOPS] [{finding.severity}] [{project_name}] - "
+        f"[{prefix}] [{finding.severity}] [{project_name}] - "
         f"FindingID: {finding.finding_id} - {title}"
     )
     return _truncate_text(subject, MAX_EMAIL_SUBJECT_LENGTH)
@@ -47,16 +57,14 @@ def build_ticket_content(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    manageengine_public_url: str | None = None,
     dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
     ticket_action: TicketAction = TicketAction.CREATE,
-    group: str | None = None,
-    category: str | None = None,
-    subcategory: str | None = None,
+    subject_prefix: str | None = None,
+    subject_product_name: str | None = None,
     generated_at: datetime | None = None,
 ) -> TicketContent:
-    """Render both text and HTML content plus ticket metadata."""
+    """Render both text and HTML email content plus audit metadata."""
     generated_at = generated_at or datetime.now(timezone.utc)
     priority = sla_policy.priority if sla_policy else "N/A"
     sla_target = sla_policy.target if sla_policy else "N/A"
@@ -67,29 +75,25 @@ def build_ticket_content(
     )
     return TicketContent(
         finding_id=finding.finding_id,
-        subject=build_subject(finding),
+        subject=build_subject(
+            finding,
+            subject_prefix=subject_prefix,
+            subject_product_name=subject_product_name,
+        ),
         body=build_body(
             finding,
             defectdojo_base_url,
-            manageengine_public_url=manageengine_public_url,
             dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
-            group=group,
-            category=category,
-            subcategory=subcategory,
             generated_at=generated_at,
         ),
         html_body=build_html_body(
             finding,
             defectdojo_base_url,
-            manageengine_public_url=manageengine_public_url,
             dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
-            group=group,
-            category=category,
-            subcategory=subcategory,
             generated_at=generated_at,
         ),
         ticket_action=ticket_action,
@@ -97,9 +101,6 @@ def build_ticket_content(
         priority=priority,
         sla_target=sla_target,
         sla_due_at=sla_due_at,
-        group=group or "N/A",
-        category=category or "N/A",
-        subcategory=subcategory or "N/A",
     )
 
 
@@ -107,13 +108,9 @@ def build_body(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    manageengine_public_url: str | None = None,
     dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
     ticket_action: TicketAction = TicketAction.CREATE,
-    group: str | None = None,
-    category: str | None = None,
-    subcategory: str | None = None,
     generated_at: datetime | None = None,
 ) -> str:
     """Render the plain-text finding notification body."""
@@ -124,12 +121,10 @@ def build_body(
     )
     mitigation = _redact_contextual_text(finding, finding.mitigation or "N/A")
     finding_url = _build_finding_url(defectdojo_base_url, finding.finding_id)
-    manageengine_url = _build_manageengine_url(manageengine_public_url)
     finding_details = _format_fields(_build_finding_detail_fields(finding))
 
-    # Ticket Routing Fields are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the return template when the
-    # ManageEngine routing fields are ready to be shown in tickets.
+    # Internal audit fields are intentionally not rendered in the email for now.
+    # Uncomment this block and add it back to the return template when needed.
     # priority = sla_policy.priority if sla_policy else "N/A"
     # sla_target = sla_policy.target if sla_policy else "N/A"
     # sla_due_at = (
@@ -137,15 +132,9 @@ def build_body(
     #     if sla_policy and sla_policy.due_at
     #     else "N/A"
     # )
-    # ticket_group = redact_secrets(group or "N/A")
-    # ticket_category = redact_secrets(category or "N/A")
-    # ticket_subcategory = redact_secrets(subcategory or "N/A")
     # routing_fields = _format_fields(
     #     [
     #         ("Ticket Action", ticket_action.value),
-    #         ("Group", ticket_group),
-    #         ("Category", ticket_category),
-    #         ("Subcategory", ticket_subcategory),
     #         ("Priority", priority),
     #         ("SLA Target", sla_target),
     #         ("SLA Due At", sla_due_at),
@@ -165,7 +154,6 @@ def build_body(
     return f'''You are receiving this email because DefectDojo detected an active and verified security finding for project "{project_name}".
 
 DefectDojo URL: {finding_url}
-ManageEngine Ticket URL: {manageengine_url}
 
 Finding Details
 {finding_details}
@@ -191,13 +179,9 @@ def build_html_body(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    manageengine_public_url: str | None = None,
     dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
     ticket_action: TicketAction = TicketAction.CREATE,
-    group: str | None = None,
-    category: str | None = None,
-    subcategory: str | None = None,
     generated_at: datetime | None = None,
 ) -> str:
     """Render an escaped HTML alternative with clickable links."""
@@ -208,12 +192,10 @@ def build_html_body(
     )
     mitigation = _redact_contextual_text(finding, finding.mitigation or "N/A")
     finding_url = _build_finding_url(defectdojo_base_url, finding.finding_id)
-    manageengine_url = _build_manageengine_url(manageengine_public_url)
     finding_details = _build_finding_detail_fields(finding)
 
-    # Ticket Routing Fields are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the HTML template when the
-    # ManageEngine routing fields are ready to be shown in tickets.
+    # Internal audit fields are intentionally not rendered in the email for now.
+    # Uncomment this block and add it back to the HTML template when needed.
     # priority = sla_policy.priority if sla_policy else "N/A"
     # sla_target = sla_policy.target if sla_policy else "N/A"
     # sla_due_at = (
@@ -223,9 +205,6 @@ def build_html_body(
     # )
     # routing_fields = [
     #     ("Ticket Action", ticket_action.value),
-    #     ("Group", redact_secrets(group or "N/A")),
-    #     ("Category", redact_secrets(category or "N/A")),
-    #     ("Subcategory", redact_secrets(subcategory or "N/A")),
     #     ("Priority", priority),
     #     ("SLA Target", sla_target),
     #     ("SLA Due At", sla_due_at),
@@ -248,7 +227,6 @@ def build_html_body(
   <body>
     <p>You are receiving this email because DefectDojo detected an active and verified security finding for project &quot;{escape(project_name)}&quot;.</p>
     <p>DefectDojo URL: {_format_html_link(finding_url, f"Open DefectDojo Finding {finding.finding_id}")}</p>
-    <p>ManageEngine Ticket URL: {_format_html_link(manageengine_url, "Open ManageEngine Requests")}</p>
 
     <p>Finding Details</p>
     {_format_html_fields(finding_details)}
@@ -277,20 +255,19 @@ def _build_finding_url(defectdojo_base_url: str | None, finding_id: int) -> str:
     return f"{defectdojo_base_url.rstrip('/')}/finding/{finding_id}"
 
 
-def _build_manageengine_url(manageengine_public_url: str | None) -> str:
-    """Build the ManageEngine request-list URL available before ticket creation."""
-    if not manageengine_public_url:
-        return "N/A"
-    # In email_fetch mode the backend sends this email before ManageEngine
-    # creates the ticket, so the exact request ID is not available yet.
-    return f"{manageengine_public_url.rstrip('/')}/WOListView.do"
-
-
 def _truncate_text(value: str, max_length: int) -> str:
     """Truncate text and reserve space for the configured ellipsis."""
     if len(value) <= max_length:
         return value
     return value[: max_length - len(EMAIL_SUBJECT_ELLIPSIS)] + EMAIL_SUBJECT_ELLIPSIS
+
+
+def _non_empty_text(value: str | None) -> str | None:
+    """Normalize optional text config values used by subject mapping."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _format_component(finding: DefectDojoFinding) -> str:

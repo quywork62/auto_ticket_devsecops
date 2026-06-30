@@ -66,45 +66,16 @@ class EmailPayload(BaseModel):
 
 
 class ProjectEmailMapping(BaseModel):
-    """Per-product ticket mailbox, notification recipients, and routing fields."""
+    """Per-product subject mapping and notification recipients."""
 
     product_name: str
-    ticket_mailbox: EmailStr | None = None
+    subject_prefix: str | None = None
+    subject_product_name: str | None = None
     to_destinations: list[EmailStr] = Field(default_factory=list)
     cc_destinations: list[EmailStr] = Field(default_factory=list)
-    group: str | None = None
-    category: str | None = None
-    subcategory: str | None = None
 
 
 class ProjectEmailMappingConfig(BaseModel):
     """Root schema for the project mapping JSON file."""
 
     projects: list[ProjectEmailMapping] = Field(default_factory=list)
-
-
-class ManageEngineRequestPayload(BaseModel):
-    """Normalized request fields required by the ManageEngine API client."""
-
-    finding_id: int
-    subject: str
-    description: str
-    ticket_action: TicketAction
-    dedupe_key: str | None = None
-    requester_name: str | None = None
-    requester_email: EmailStr | None = None
-    priority: str | None = None
-    sla_target: str | None = None
-    group: str | None = None
-    category: str | None = None
-    subcategory: str | None = None
-    status: str = "Open"
-    impact_details: str | None = None
-
-
-class ManageEngineRequestResult(BaseModel):
-    """Relevant ticket information parsed from a ManageEngine API response."""
-
-    request_id: str | None = None
-    status: str
-    raw_response: dict = Field(default_factory=dict)

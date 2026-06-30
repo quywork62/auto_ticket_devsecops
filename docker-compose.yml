@@ -1,32 +1,17 @@
 services:
-  migrate:
-    build: .
-    env_file:
-      - .env
-    command: ["alembic", "upgrade", "head"]
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   app:
     build: .
     env_file:
       - .env
     ports:
       - "8000:8000"
+    volumes:
+      - ./config:/app/config:ro
     init: true
     restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     healthcheck:
       test:
         [
@@ -40,15 +25,15 @@ services:
       retries: 3
       start_period: 15s
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: devsecops
       POSTGRES_USER: devsecops
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devsecops}
+      POSTGRES_PASSWORD: devsecops
     ports:
       - "127.0.0.1:5432:5432"
     restart: unless-stopped

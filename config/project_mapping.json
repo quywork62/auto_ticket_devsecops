@@ -1,12 +1,24 @@
 {
   "projects": [
     {
-      "product_name": "vietjet-skyshop",
+      "product_name": "demo-devsecops-project:demo-mapping",
       "to_destinations": [
         "canhvp@galaxy.one",
         "quyph@galaxy.one"
       ],
-      "cc_destinations": []
+      "cc_destinations": [
+  
+      ]
+    },
+    {
+      "product_name": "apigee-vja-devsecops:demo-vj",
+      "to_destinations": [
+        "canhvp@galaxy.one",
+        "quyph@galaxy.one"
+      ],
+      "cc_destinations": [
+        
+      ]
     }
   ]
 }
