@@ -18,7 +18,6 @@ FastAPI starts
 -> APScheduler runs immediately, then every configured interval
 -> Fetch DefectDojo findings: active=true, verified=true
 -> Normalize finding data
--> Acquire PostgreSQL dedupe lease
 -> Check finding_id and dedupe_key
 -> Duplicate: SKIP
 -> New finding:
@@ -119,6 +118,11 @@ Database schema is managed by Alembic:
 
 FastAPI startup does not create or alter tables.
 
+Database bootstrap scripts and the full column/permission reference are in
+[db/SCHEMA.md](db/SCHEMA.md). Use those files when deploying to an external
+PostgreSQL service or when a DBA needs to review users, grants, tables, and
+columns before EC2 deployment.
+
 ## Source Layout
 
 ```text
@@ -141,6 +145,7 @@ src/
   health.py                /health and /health/db
 
 alembic/                   Versioned PostgreSQL migrations
+db/                        Database bootstrap, grants, verify scripts, schema docs
 config/project_mapping.json
                             Product routing configuration
 scripts/                    Manual one-shot test command

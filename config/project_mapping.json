@@ -1,59 +1,12 @@
 {
   "projects": [
     {
-      "product_name": "canhvp-demo",
-      "ticket_mailbox": "me.ticket.galaxy.one@gmail.com",
+      "product_name": "vietjet-skyshop",
       "to_destinations": [
-        "quyph@galaxy.one",
-        "hoangquy0803203@gmail.com"
+        "canhvp@galaxy.one",
+        "quyph@galaxy.one"
       ],
-      "cc_destinations": [
-        "devsecops.galaxy.one@gmail.com"
-      ]
-    },
-    {
-      "product_name": "check_500",
-      "ticket_mailbox": "me.ticket.galaxy.one@gmail.com",
-      "to_destinations": [
-        "quyph@galaxy.one",
-        "hoangquy0803203@gmail.com"
-      ],
-      "cc_destinations": [
-        "devsecops.galaxy.one@gmail.com"
-      ]
-    },
-    {
-      "product_name": "check_threagile",
-      "ticket_mailbox": "me.ticket.galaxy.one@gmail.com",
-      "to_destinations": [
-        "quyph@galaxy.one",
-        "hoangquy0803203@gmail.com"
-      ],
-      "cc_destinations": [
-        "devsecops.galaxy.one@gmail.com"
-      ]
-    },
-    {
-      "product_name": "demo-devsecops-project",
-      "ticket_mailbox": "me.ticket.galaxy.one@gmail.com",
-      "to_destinations": [
-        "quyph@galaxy.one",
-        "hoangquy0803203@gmail.com"
-      ],
-      "cc_destinations": [
-        "devsecops.galaxy.one@gmail.com"
-      ]
-    },
-    {
-      "product_name": "demo-dojo",
-      "ticket_mailbox": "me.ticket.galaxy.one@gmail.com",
-      "to_destinations": [
-        "quyph@galaxy.one",
-        "hoangquy0803203@gmail.com"
-      ],
-      "cc_destinations": [
-        "devsecops.galaxy.one@gmail.com"
-      ]
+      "cc_destinations": []
     }
   ]
 }
