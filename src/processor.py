@@ -149,7 +149,9 @@ class FindingProcessor:
             return
 
         for finding in findings:
-            new_finding_count += self.process_finding(finding)
+            if self.processing_logs.get_by_finding_id(finding.finding_id) is None:
+                new_finding_count += 1
+            self.process_finding(finding)
 
         self.process_notification_queue()
         logger.info(
