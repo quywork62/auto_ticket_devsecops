@@ -1,5 +1,6 @@
 services:
   app:
+    container_name: auto_ticket
     build: .
     env_file:
       - .env
@@ -30,17 +31,18 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    container_name: postgres
     environment:
-      POSTGRES_DB: devsecops
-      POSTGRES_USER: devsecops
-      POSTGRES_PASSWORD: devsecops
+      POSTGRES_DB: auto_ticket
+      POSTGRES_USER: devsecops_app
+      POSTGRES_PASSWORD: 9285b024db745f31e613feb6756ac929
     ports:
       - "127.0.0.1:5432:5432"
     restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U devsecops -d devsecops"]
+      test: ["CMD-SHELL", "pg_isready -U devsecops_app -d auto_ticket"]
       interval: 5s
       timeout: 5s
       retries: 10

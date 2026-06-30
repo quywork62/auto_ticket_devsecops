@@ -36,6 +36,13 @@ def get_session_factory() -> sessionmaker[Session]:
     return _session_factory
 
 
+def initialize_database() -> None:
+    """Create any missing ORM tables before background jobs start."""
+    import db_models  # noqa: F401
+
+    Base.metadata.create_all(bind=get_engine())
+
+
 def check_database_connection() -> bool:
     """Return whether the database accepts a simple validation query."""
     try:

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 
 from config import get_settings
+from database import initialize_database
 from health import router as health_router
 from scheduler import AppScheduler
 
@@ -75,6 +76,7 @@ def configure_logging() -> None:
 async def lifespan(app: FastAPI):
     """Start the scheduler after deployment migrations have completed."""
     configure_logging()
+    initialize_database()
     settings = get_settings()
     scheduler = AppScheduler(settings)
     app.state.scheduler = scheduler

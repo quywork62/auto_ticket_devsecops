@@ -135,7 +135,7 @@ class FindingProcessor:
         """Fetch findings, drain queued mail, and process each result."""
         self._reload_project_email_mapping()
         self.process_notification_queue()
-        sent_count = 0
+        new_finding_count = 0
 
         try:
             findings = self.defectdojo_client.fetch_active_verified_findings(
@@ -149,14 +149,14 @@ class FindingProcessor:
             return
 
         for finding in findings:
-            sent_count += self.process_finding(finding)
+            new_finding_count += self.process_finding(finding)
 
         self.process_notification_queue()
         logger.info(
             "Scheduler cycle completed for current findings",
             extra={
-                "total_send_count": len(findings),
-                "new_sent_count": sent_count,
+                "total_finding": len(findings),
+                "new_finding": new_finding_count,
             },
         )
 
