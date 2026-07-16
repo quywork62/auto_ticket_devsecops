@@ -13,6 +13,7 @@ MAX_EMAIL_SUBJECT_LENGTH = 200
 EMAIL_SUBJECT_ELLIPSIS = "....."
 DEFAULT_EMAIL_SUBJECT_PREFIX = "VJA-DEVSECOPS"
 SUPPORT_TEAM_NAME = "DevSecOps Team"
+SUPPORT_EMAIL = "itsupport@galaxy.one"
 
 
 @dataclass(frozen=True)
@@ -165,12 +166,14 @@ Mitigation / Recommendation
 {_format_paragraph(mitigation)}
 
 For support, contact {SUPPORT_TEAM_NAME}.
+Email: {SUPPORT_EMAIL}
+
 
 Security Note
 Any API key, token, secret key, or password in the original finding should be masked as XXXXXX before sending to ticketing.
 
 --
-Please do not reply directly to this email.
+
 This message was generated automatically by VJA DevSecOps Automation Service.
 '''
 
@@ -236,13 +239,13 @@ def build_html_body(
 
     <p>Mitigation / Recommendation</p>
     {_format_html_paragraph(mitigation)}
-    <p>For support, contact {escape(SUPPORT_TEAM_NAME)}.</p>
+    <p>For support, contact {escape(SUPPORT_TEAM_NAME)}.<br>
+    Email: <a href="mailto:{escape(SUPPORT_EMAIL)}">{escape(SUPPORT_EMAIL)}</a></p>
 
     <p>Security Note</p>
     <p>Any API key, token, secret key, or password in the original finding should be masked as XXXXXX before sending to ticketing.</p>
 
-    <p>Please do not reply directly to this email.<br>
-    This message was generated automatically by VJA DevSecOps Automation Service.</p>
+    <p>This message was generated automatically by VJA DevSecOps Automation Service.</p>
   </body>
 </html>
 """

@@ -1,23 +1,12 @@
 {
   "projects": [
     {
-      "product_name": "demo-devsecops-project:demo-mapping",
+      "product_name": "vietjet-ifs:ifs",
       "to_destinations": [
         "canhvp@galaxy.one",
         "quyph@galaxy.one"
       ],
       "cc_destinations": [
-  
-      ]
-    },
-    {
-      "product_name": "apigee-vja-devsecops:demo-vj",
-      "to_destinations": [
-        "canhvp@galaxy.one",
-        "quyph@galaxy.one"
-      ],
-      "cc_destinations": [
-        
       ]
     }
   ]
