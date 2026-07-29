@@ -11,9 +11,9 @@ from schemas import DefectDojoFinding, SlaPolicy, TicketAction
 
 MAX_EMAIL_SUBJECT_LENGTH = 200
 EMAIL_SUBJECT_ELLIPSIS = "....."
-DEFAULT_EMAIL_SUBJECT_PREFIX = "VJA-DEVSECOPS"
-SUPPORT_TEAM_NAME = "DevSecOps Team"
-SUPPORT_EMAIL = "itsupport@galaxy.one"
+DEFAULT_EMAIL_SUBJECT_PREFIX = "SECURITY"
+SUPPORT_TEAM_NAME = "Security Team"
+SUPPORT_EMAIL = "security@example.com"
 
 
 @dataclass(frozen=True)
@@ -174,7 +174,7 @@ Any API key, token, secret key, or password in the original finding should be ma
 
 --
 
-This message was generated automatically by VJA DevSecOps Automation Service.
+This message was generated automatically by the Security Automation Service.
 '''
 
 
@@ -245,7 +245,7 @@ def build_html_body(
     <p>Security Note</p>
     <p>Any API key, token, secret key, or password in the original finding should be masked as XXXXXX before sending to ticketing.</p>
 
-    <p>This message was generated automatically by VJA DevSecOps Automation Service.</p>
+    <p>This message was generated automatically by the Security Automation Service.</p>
   </body>
 </html>
 """

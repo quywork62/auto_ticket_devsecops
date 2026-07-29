@@ -17,6 +17,13 @@ credentials.json
 service-account*.json
 secrets/
 .secrets/
+config/*.local.json
+db/
+*.sql
+*.dump
+*.bak
+*.sqlite
+*.sqlite3
 logs/
 *.log
 .coverage

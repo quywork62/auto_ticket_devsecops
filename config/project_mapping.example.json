@@ -1,0 +1,13 @@
+{
+    "projects": [
+        {
+            "product_name": "payment-api:Payment API",
+            "to_destinations": [
+                "payment-team@example.com"
+            ],
+            "cc_destinations": [
+                "security@example.com"
+            ]
+        }
+    ]
+}
