@@ -3,7 +3,8 @@
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import EmailStr, Field, field_validator
+from urllib.parse import urlsplit
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,13 +34,10 @@ class Settings(BaseSettings):
     smtp_port: int = Field(SMTP_SUBMISSION_PORT, alias="SMTP_PORT")
     smtp_username: str | None = Field(None, alias="SMTP_USERNAME")
     smtp_password: str | None = Field(None, alias="SMTP_PASSWORD")
-    smtp_from_email: str = Field(..., alias="SMTP_FROM_EMAIL")
+    smtp_from_email: EmailStr = Field(..., alias="SMTP_FROM_EMAIL")
     smtp_use_tls: bool = Field(True, alias="SMTP_USE_TLS")
     smtp_timeout_seconds: int = Field(30, alias="SMTP_TIMEOUT_SECONDS")
     scheduler_interval_seconds: int = Field(300, alias="SCHEDULER_INTERVAL_SECONDS")
-    notification_lease_ttl_seconds: int = Field(
-        1800, alias="NOTIFICATION_LEASE_TTL_SECONDS"
-    )
 
     smtp_max_emails_per_minute: int = Field(30, alias="SMTP_MAX_EMAILS_PER_MINUTE")
     smtp_max_emails_per_hour: int = Field(500, alias="SMTP_MAX_EMAILS_PER_HOUR")
@@ -61,7 +59,35 @@ class Settings(BaseSettings):
     @classmethod
     def strip_trailing_slash(cls, value: str) -> str:
         """Normalize the DefectDojo base URL for safe URL joining."""
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("DefectDojo URL must be an HTTP(S) URL without credentials, query or fragment")
         return value.rstrip("/")
+
+    @field_validator("defectdojo_findings_limit", "defectdojo_request_timeout_seconds",
+                     "smtp_timeout_seconds", "scheduler_interval_seconds",
+                     "smtp_max_emails_per_minute", "smtp_max_emails_per_hour",
+                     "smtp_max_attempts", "smtp_retry_delay_seconds",
+                     "smtp_retry_backoff_multiplier")
+    @classmethod
+    def positive_number(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Value must be positive")
+        return value
+
+    @field_validator("smtp_port")
+    @classmethod
+    def valid_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError("SMTP port must be between 1 and 65535")
+        return value
+
+    @field_validator("defectdojo_api_token", "smtp_host", "database_url")
+    @classmethod
+    def nonempty_required_value(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Required configuration cannot be blank")
+        return value
 
     @field_validator("project_email_mapping_json", mode="before")
     @classmethod

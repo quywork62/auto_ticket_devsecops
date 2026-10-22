@@ -1,19 +1,98 @@
 """Build safe plain-text and HTML notification email content."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from html import escape
 import re
 from textwrap import fill
 
 from redaction import MASK, redact_secrets
 from schemas import DefectDojoFinding, SlaPolicy, TicketAction
+from sla import format_due_at
 
 MAX_EMAIL_SUBJECT_LENGTH = 200
 EMAIL_SUBJECT_ELLIPSIS = "....."
-DEFAULT_EMAIL_SUBJECT_PREFIX = "SECURITY"
-SUPPORT_TEAM_NAME = "Security Team"
-SUPPORT_EMAIL = "security@example.com"
+DEFAULT_EMAIL_SUBJECT_PREFIX = "DEVSECOPS"
+FIELD_LABEL_WIDTH = 20
+SUPPORT_EMAIL = "devsecops@example.com"
+MAX_DETAIL_LENGTH = 600
+MAX_ACTION_LENGTH = 450
+
+
+def _clean_import_text(value: str | None) -> str:
+    """Convert import separators without removing masking asterisks."""
+    return re.sub(r"\bNEWLINE\b", "\n", value or "").replace("\u2028", "\n").strip()
+
+
+def _import_fields(value: str) -> dict[str, str]:
+    pattern = re.compile(r"\*\*([^*\n]+?)\s*:\s*\*\*|\*\*([^*\n]+?)\*\*\s*:")
+    matches = list(pattern.finditer(value))
+    return {
+        (match.group(1) or match.group(2)).strip().lower():
+        value[match.end():matches[i+1].start() if i+1 < len(matches) else len(value)].strip()
+        for i, match in enumerate(matches)
+    }
+
+
+def _excerpt(value: str | None, limit: int) -> str | None:
+    if not value:
+        return None
+    text = redact_secrets(_clean_import_text(value))
+    text = re.sub(r"(?<=-)\n(?=\w)", "", text)
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "… [Full details in DefectDojo]"
+
+
+def _presentation_finding(finding: DefectDojoFinding) -> DefectDojoFinding:
+    """Summarize known import formats on a copy; never change source evidence."""
+    description = _clean_import_text(finding.description)
+    fields = _import_fields(description)
+    scanner = (finding.scanner_type or "").lower()
+    updates: dict[str, object] = {}
+    if "sonarqube" in scanner and fields.get("message"):
+        description = fields["message"]
+        updates["rule_id"] = fields.get("rule") or finding.rule_id
+        component = fields.get("componentkey path") or fields.get("component")
+        if component:
+            updates["file_path"] = component.split(":", 1)[-1]
+        if finding.line is None:
+            line = fields.get("line", "")
+            if not line.isdigit():
+                match = re.search(r"startLine:\s*(\d+)", fields.get("textrange", ""))
+                line = match.group(1) if match else ""
+            updates["line"] = int(line) if line.isdigit() else None
+    elif "gitleaks" in scanner:
+        updates["rule_id"] = fields.get("rule id") or finding.rule_id
+        if fields.get("secret") or fields.get("match"):
+            description = "Potential hardcoded credential detected. See the affected file and rule."
+    elif "dependency" in scanner:
+        if fields.get("filepath"):
+            updates["file_path"] = fields["filepath"]
+        description = description.split("**Source:", 1)[0].strip()
+    elif "trivy" in scanner:
+        updates["container_image"] = finding.container_image or fields.get("target")
+        fixed_lines = (fields.get("fixed version") or "").splitlines()
+        fixed = finding.fixed_version or (fixed_lines[0] if fixed_lines else None)
+        updates["fixed_version"] = fixed
+        if fields:
+            description = description.split("**Target:", 1)[0].strip()
+        if fixed and _clean_import_text(finding.mitigation) == fixed:
+            updates["mitigation"] = f"Upgrade {finding.component_name or 'the affected package'} to {fixed}."
+    impact = _clean_import_text(finding.impact)
+    # Only use an explicit Impact section, not arbitrary scanner evidence.
+    if not impact:
+        match = re.search(r"(?ims)^##\s+Impact\s*\n(.*?)(?=^##\s|\Z)", description)
+        if match:
+            impact = match.group(1).strip()
+            description = (description[:match.start()] + description[match.end():]).strip()
+    if finding.cwe in (0, "0", "CWE-0"):
+        updates["cwe"] = None
+    updates["description"] = _excerpt(description, MAX_DETAIL_LENGTH)
+    updates["impact"] = _excerpt(impact, MAX_ACTION_LENGTH)
+    updates["mitigation"] = _excerpt(updates.get("mitigation", finding.mitigation), MAX_ACTION_LENGTH)
+    updates["fingerprint"] = None
+    return finding.model_copy(update=updates)
 
 
 @dataclass(frozen=True)
@@ -25,7 +104,6 @@ class TicketContent:
     body: str
     html_body: str
     ticket_action: TicketAction
-    dedupe_key: str | None
     priority: str
     sla_target: str
     sla_due_at: str
@@ -35,22 +113,16 @@ def build_subject(
     finding: DefectDojoFinding,
     *,
     subject_prefix: str | None = None,
-    subject_product_name: str | None = None,
+    subject_product: str | None = None,
 ) -> str:
     """Build a redacted email subject capped at the configured length."""
     prefix = redact_secrets(
         _non_empty_text(subject_prefix) or DEFAULT_EMAIL_SUBJECT_PREFIX
     )
-    project_name = redact_secrets(
-        _non_empty_text(subject_product_name)
-        or _non_empty_text(finding.product)
-        or "Unknown Project"
-    )
     title = _redact_contextual_text(finding, finding.title)
-    subject = (
-        f"[{prefix}] [{finding.severity}] [{project_name}] - "
-        f"FindingID: {finding.finding_id} - {title}"
-    )
+    product = redact_secrets(subject_product or finding.product or "Unmapped")
+    subject = f"[{prefix}] [{redact_secrets(finding.severity)}] [{product}] - FindingID: {finding.finding_id} - {title}"
+    subject = re.sub(r"[\r\n]+", " ", subject)
     return _truncate_text(subject, MAX_EMAIL_SUBJECT_LENGTH)
 
 
@@ -58,47 +130,33 @@ def build_ticket_content(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
     ticket_action: TicketAction = TicketAction.CREATE,
     subject_prefix: str | None = None,
-    subject_product_name: str | None = None,
-    generated_at: datetime | None = None,
+    subject_product: str | None = None,
 ) -> TicketContent:
     """Render both text and HTML email content plus audit metadata."""
-    generated_at = generated_at or datetime.now(timezone.utc)
     priority = sla_policy.priority if sla_policy else "N/A"
     sla_target = sla_policy.target if sla_policy else "N/A"
-    sla_due_at = (
-        sla_policy.due_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        if sla_policy and sla_policy.due_at
-        else "N/A"
-    )
+    sla_due_at = format_due_at(sla_policy.due_at if sla_policy else None) or "N/A"
     return TicketContent(
         finding_id=finding.finding_id,
         subject=build_subject(
             finding,
             subject_prefix=subject_prefix,
-            subject_product_name=subject_product_name,
+            subject_product=subject_product,
         ),
         body=build_body(
             finding,
             defectdojo_base_url,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
-            ticket_action=ticket_action,
-            generated_at=generated_at,
         ),
         html_body=build_html_body(
             finding,
             defectdojo_base_url,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
-            ticket_action=ticket_action,
-            generated_at=generated_at,
         ),
         ticket_action=ticket_action,
-        dedupe_key=dedupe_key,
         priority=priority,
         sla_target=sla_target,
         sla_due_at=sla_due_at,
@@ -109,152 +167,69 @@ def build_body(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
-    ticket_action: TicketAction = TicketAction.CREATE,
-    generated_at: datetime | None = None,
 ) -> str:
     """Render the plain-text finding notification body."""
-    generated_at = generated_at or datetime.now(timezone.utc)
-    project_name = redact_secrets(finding.product or "N/A")
-    impact = _redact_contextual_text(
-        finding, finding.impact or finding.description or "N/A"
-    )
-    mitigation = _redact_contextual_text(finding, finding.mitigation or "N/A")
-    finding_url = _build_finding_url(defectdojo_base_url, finding.finding_id)
-    finding_details = _format_fields(_build_finding_detail_fields(finding))
-
-    # Internal audit fields are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the return template when needed.
-    # priority = sla_policy.priority if sla_policy else "N/A"
-    # sla_target = sla_policy.target if sla_policy else "N/A"
-    # sla_due_at = (
-    #     sla_policy.due_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    #     if sla_policy and sla_policy.due_at
-    #     else "N/A"
-    # )
-    # routing_fields = _format_fields(
-    #     [
-    #         ("Ticket Action", ticket_action.value),
-    #         ("Priority", priority),
-    #         ("SLA Target", sla_target),
-    #         ("SLA Due At", sla_due_at),
-    #         ("Dedupe Key", dedupe_key or "N/A"),
-    #         ("Ticket Source", "DefectDojo Auto Ticket"),
-    #     ]
-    # )
-
-    # Recommended Actions are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the return template when needed.
-    # Recommended Actions
-    # - Review the finding details in DefectDojo.
-    # - Validate whether the finding affects the application or environment.
-    # - Prioritize remediation based on severity, priority, and SLA target.
-    # - Update the finding status in DefectDojo after remediation or acceptance.
-
-    return f'''You are receiving this email because DefectDojo detected an active and verified security finding for project "{project_name}".
-
-DefectDojo URL: {finding_url}
-
-Finding Details
-{finding_details}
-
-Impact
-{_format_paragraph(impact)}
-
-Mitigation / Recommendation
-{_format_paragraph(mitigation)}
-
-For support, contact {SUPPORT_TEAM_NAME}.
-Email: {SUPPORT_EMAIL}
-
-
-Security Note
-Any API key, token, secret key, or password in the original finding should be masked as XXXXXX before sending to ticketing.
-
---
-
-This message was generated automatically by the Security Automation Service.
-'''
+    finding = _presentation_finding(finding)
+    sections = [
+        _format_text_section("Security Finding", _build_summary_fields(finding)),
+        _format_text_section("Finding Details", _build_description_fields(finding)),
+        _format_text_section("Affected Location", _build_location_fields(finding)),
+        _format_text_section("Technical Details", _build_technical_fields(finding)),
+        _format_text_section("Security Impact", text=_impact_text(finding)),
+        _format_text_section("Recommended Action", text=_mitigation_text(finding)),
+        _format_text_section(
+            "Remediation Tracking",
+            _build_tracking_fields(finding, defectdojo_base_url, sla_policy),
+        ),
+    ]
+    sections.append(_format_text_section(
+        "Technical Support",
+        text=f"For assistance with this finding, contact:\n{SUPPORT_EMAIL}",
+    ))
+    return "\n\n".join(section for section in sections if section) + "\n"
 
 
 def build_html_body(
     finding: DefectDojoFinding,
     defectdojo_base_url: str | None = None,
     *,
-    dedupe_key: str | None = None,
     sla_policy: SlaPolicy | None = None,
-    ticket_action: TicketAction = TicketAction.CREATE,
-    generated_at: datetime | None = None,
 ) -> str:
     """Render an escaped HTML alternative with clickable links."""
-    generated_at = generated_at or datetime.now(timezone.utc)
-    project_name = redact_secrets(finding.product or "N/A")
-    impact = _redact_contextual_text(
-        finding, finding.impact or finding.description or "N/A"
+    finding = _presentation_finding(finding)
+    sections = [
+        _format_html_section("Security Finding", _build_summary_fields(finding)),
+        _format_html_section("Finding Details", _build_description_fields(finding)),
+        _format_html_section("Affected Location", _build_location_fields(finding)),
+        _format_html_section("Technical Details", _build_technical_fields(finding)),
+        _format_html_section("Security Impact", text=_impact_text(finding)),
+        _format_html_section("Recommended Action", text=_mitigation_text(finding)),
+        _format_html_section(
+            "Remediation Tracking",
+            _build_tracking_fields(finding, defectdojo_base_url, sla_policy),
+            link_label="View in DefectDojo",
+        ),
+    ]
+    sections.append(
+        '<h3>Technical Support</h3><p>For assistance with this finding, contact:<br>'
+        f'<a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a></p>'
     )
-    mitigation = _redact_contextual_text(finding, finding.mitigation or "N/A")
-    finding_url = _build_finding_url(defectdojo_base_url, finding.finding_id)
-    finding_details = _build_finding_detail_fields(finding)
-
-    # Internal audit fields are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the HTML template when needed.
-    # priority = sla_policy.priority if sla_policy else "N/A"
-    # sla_target = sla_policy.target if sla_policy else "N/A"
-    # sla_due_at = (
-    #     sla_policy.due_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    #     if sla_policy and sla_policy.due_at
-    #     else "N/A"
-    # )
-    # routing_fields = [
-    #     ("Ticket Action", ticket_action.value),
-    #     ("Priority", priority),
-    #     ("SLA Target", sla_target),
-    #     ("SLA Due At", sla_due_at),
-    #     ("Dedupe Key", dedupe_key or "N/A"),
-    #     ("Ticket Source", "DefectDojo Auto Ticket"),
-    # ]
-
-    # Recommended Actions are intentionally not rendered in the email for now.
-    # Uncomment this block and add it back to the HTML template when needed.
-    # <p>Recommended Actions</p>
-    # <ul>
-    #   <li>Review the finding details in DefectDojo.</li>
-    #   <li>Validate whether the finding affects the application or environment.</li>
-    #   <li>Prioritize remediation based on severity, priority, and SLA target.</li>
-    #   <li>Update the finding status in DefectDojo after remediation or acceptance.</li>
-    # </ul>
+    html_sections = "\n    ".join(section for section in sections if section)
 
     return f"""<!doctype html>
 <html>
   <body>
-    <p>You are receiving this email because DefectDojo detected an active and verified security finding for project &quot;{escape(project_name)}&quot;.</p>
-    <p>DefectDojo URL: {_format_html_link(finding_url, f"Open DefectDojo Finding {finding.finding_id}")}</p>
-
-    <p>Finding Details</p>
-    {_format_html_fields(finding_details)}
-
-    <p>Impact</p>
-    {_format_html_paragraph(impact)}
-
-    <p>Mitigation / Recommendation</p>
-    {_format_html_paragraph(mitigation)}
-    <p>For support, contact {escape(SUPPORT_TEAM_NAME)}.<br>
-    Email: <a href="mailto:{escape(SUPPORT_EMAIL)}">{escape(SUPPORT_EMAIL)}</a></p>
-
-    <p>Security Note</p>
-    <p>Any API key, token, secret key, or password in the original finding should be masked as XXXXXX before sending to ticketing.</p>
-
-    <p>This message was generated automatically by the Security Automation Service.</p>
+    {html_sections}
   </body>
 </html>
 """
 
 
-def _build_finding_url(defectdojo_base_url: str | None, finding_id: int) -> str:
+def _build_finding_url(defectdojo_base_url: str | None, finding_id: int) -> str | None:
     """Build a direct DefectDojo finding URL when a base URL is available."""
     if not defectdojo_base_url:
-        return "N/A"
+        return None
     return f"{defectdojo_base_url.rstrip('/')}/finding/{finding_id}"
 
 
@@ -280,67 +255,115 @@ def _format_component(finding: DefectDojoFinding) -> str:
     return finding.component_name or finding.component_version or "N/A"
 
 
-def _build_finding_detail_fields(finding: DefectDojoFinding) -> list[tuple[str, str]]:
-    """Build non-empty detail fields for the detected template type."""
-    template_name = _select_detail_template(finding)
-    project_name = redact_secrets(finding.product or "N/A")
-    base_fields = [
-        ("Project", project_name),
-        ("Severity", finding.severity),
-    ]
+def _build_summary_fields(finding: DefectDojoFinding) -> list[tuple[str, str]]:
+    """Build identity fields without inventing missing scanner metadata."""
+    scanner = (finding.scanner_type or "").replace(" (Generic Findings Import)", "") or None
+    category = finding.category or (
+        "Secret Management" if scanner and "gitleaks" in scanner.lower() else None
+    )
+    status_parts = []
+    if finding.active is not None:
+        status_parts.append("Active" if finding.active else "Inactive")
+    if finding.verified is not None:
+        status_parts.append("Verified" if finding.verified else "Unverified")
+    return _compact_fields(
+        [
+            ("Project", finding.product),
+            ("Scanner", scanner),
+            ("Category", category),
+            ("Finding ID", finding.finding_id),
+            ("Severity", finding.severity),
+            ("Status", " / ".join(status_parts)),
+        ]
+    )
 
-    if template_name == "cloud":
-        cloud_fields = _extract_cloud_fields(finding)
-        detail_fields = [
-            ("Control ID", cloud_fields.get("control_id")),
-            ("Standard", cloud_fields.get("standard")),
-            ("AWS Account", cloud_fields.get("aws_account")),
-            ("Region", cloud_fields.get("region")),
-            ("Finding Reference", cloud_fields.get("finding_reference")),
+
+def _build_description_fields(finding: DefectDojoFinding) -> list[tuple[str, str]]:
+    """Keep the DefectDojo description distinct from security impact."""
+    return _compact_fields(
+        [
+            ("Title", _redact_contextual_text(finding, finding.title)),
+            ("Description", _redact_contextual_text(finding, finding.description)),
+        ]
+    )
+
+
+def _build_location_fields(finding: DefectDojoFinding) -> list[tuple[str, str]]:
+    """Include only available source, endpoint, or cloud location fields."""
+    cloud_fields = (
+        _extract_cloud_fields(finding) if _looks_like_cloud_finding(finding) else {}
+    )
+    return _compact_fields(
+        [
+            ("Repository", finding.repository),
+            ("File", finding.file_path),
+            ("Line", finding.line),
+            ("Endpoint", finding.endpoint),
+            ("HTTP Method", finding.http_method),
+            ("Parameter", finding.parameter),
+            ("Container Image", finding.container_image),
             ("Resource", cloud_fields.get("resource")),
             ("Resource Type", cloud_fields.get("resource_type")),
+            ("AWS Account", cloud_fields.get("aws_account")),
+            ("Region", cloud_fields.get("region")),
+        ]
+    )
+
+
+def _build_technical_fields(finding: DefectDojoFinding) -> list[tuple[str, str]]:
+    """Render scanner evidence and scores when DefectDojo supplies them."""
+    cloud_fields = (
+        _extract_cloud_fields(finding) if _looks_like_cloud_finding(finding) else {}
+    )
+    cwe = str(finding.cwe) if _has_value(finding.cwe) else None
+    if cwe and not cwe.upper().startswith("CWE-"):
+        cwe = f"CWE-{cwe}"
+    return _compact_fields(
+        [
+            ("CWE", cwe),
+            ("Vulnerability", finding.vuln_id_from_tool or finding.cve),
+            ("CVSS", finding.cvss_score),
+            ("EPSS", finding.epss_score),
+            ("Rule", finding.rule_id),
+            ("Secret Type", finding.secret_type),
+            ("Fingerprint", finding.fingerprint),
+            ("Component / Package", finding.component_name),
+            ("Installed Version", finding.component_version),
+            ("Fixed Version", finding.fixed_version),
+            ("Control ID", cloud_fields.get("control_id")),
+            ("Standard", cloud_fields.get("standard")),
+            ("Finding Reference", cloud_fields.get("finding_reference")),
             ("Compliance Status", cloud_fields.get("compliance_status")),
         ]
-    elif template_name == "dast":
-        detail_fields = [
-            ("Endpoint", finding.endpoint),
-            ("Parameter", finding.parameter),
-            ("CWE", finding.cwe),
-            ("Rule ID", finding.rule_id),
-        ]
-    elif template_name == "sast":
-        detail_fields = [
-            ("File Path", finding.file_path),
-            ("Line", finding.line),
-            ("Rule ID", finding.rule_id),
-            ("CWE", finding.cwe),
-        ]
-    else:
-        detail_fields = [
-            ("Component", _format_component(finding)),
-            ("CWE", finding.cwe),
-            ("CVE", finding.cve),
-            ("File Path", finding.file_path),
-        ]
-
-    return _compact_fields(base_fields + detail_fields)
+    )
 
 
-def _select_detail_template(finding: DefectDojoFinding) -> str:
-    """Select cloud, DAST, dependency, or SAST field layout."""
-    if _looks_like_cloud_finding(finding):
-        return "cloud"
-    if _has_value(finding.endpoint) or _has_value(finding.parameter):
-        return "dast"
-    if _has_value(finding.cve) or _has_value(_format_component(finding)):
-        return "dependency"
-    if (
-        _has_value(finding.file_path)
-        or _has_value(finding.rule_id)
-        or _has_value(finding.line)
-    ):
-        return "sast"
-    return "dependency"
+def _build_tracking_fields(
+    finding: DefectDojoFinding,
+    defectdojo_base_url: str | None,
+    sla_policy: SlaPolicy | None,
+) -> list[tuple[str, str]]:
+    """Return policy dates and the direct finding link when available."""
+    due_at = format_due_at(sla_policy.due_at if sla_policy else None)
+    return _compact_fields(
+        [
+            ("SLA", sla_policy.target if sla_policy else None),
+            ("Due Date", due_at),
+            ("View in DefectDojo", _build_finding_url(defectdojo_base_url, finding.finding_id)),
+        ]
+    )
+
+
+def _impact_text(finding: DefectDojoFinding) -> str:
+    if _has_value(finding.impact):
+        return _redact_contextual_text(finding, finding.impact)
+    return ""
+
+
+def _mitigation_text(finding: DefectDojoFinding) -> str:
+    if _has_value(finding.mitigation):
+        return _redact_contextual_text(finding, finding.mitigation)
+    return ""
 
 
 def _looks_like_cloud_finding(finding: DefectDojoFinding) -> bool:
@@ -386,7 +409,6 @@ def _extract_cloud_fields(finding: DefectDojoFinding) -> dict[str, str | None]:
         for value in (finding.impact, finding.description, finding.mitigation)
         if value
     )
-    component = _format_component(finding)
     raw_resource = finding.resource or _extract_labeled_value(
         text, ("Resource", "Resource ID", "Resource ARN")
     )
@@ -406,8 +428,7 @@ def _extract_cloud_fields(finding: DefectDojoFinding) -> dict[str, str | None]:
 
     return {
         "resource": _redact_cloud_identifier(raw_resource),
-        "resource_type": finding.resource_type
-        or (component if _has_value(component) else None),
+        "resource_type": finding.resource_type,
         "aws_account": MASK if _has_value(raw_account) else securityhub_fields.get("account"),
         "region": raw_region or securityhub_fields.get("region"),
         "control_id": securityhub_fields.get("control_id") or raw_control,
@@ -548,18 +569,62 @@ def _has_value(value: object) -> bool:
     return True
 
 
-def _format_fields(fields: list[tuple[str, str]]) -> str:
-    """Format key-value fields as a plain-text bullet list."""
-    return "\n".join(f"- {label}: {value}" for label, value in fields)
+def _format_text_section(
+    heading: str,
+    fields: list[tuple[str, str]] | None = None,
+    *,
+    text: str | None = None,
+) -> str:
+    """Format one populated section using the requested text layout."""
+    if not fields and not text:
+        return ""
+    lines = [heading, "-" * len(heading)]
+    if fields:
+        width = FIELD_LABEL_WIDTH
+        for label, value in fields:
+            normalized = "\n".join(
+                fill(part.strip(), width=88 - width - 3, break_long_words=False,
+                     break_on_hyphens=False)
+                for part in value.splitlines() if part.strip()
+            )
+            indented = normalized.replace("\n", "\n" + " " * (width + 3))
+            lines.append(f"{label:<{width}} : {indented}")
+    if text:
+        lines.append(_format_paragraph(text))
+    return "\n".join(lines)
 
 
-def _format_html_fields(fields: list[tuple[str, str]]) -> str:
-    """Format escaped key-value fields as an HTML list."""
-    items = "\n".join(
-        f"<li>{escape(label)}: {escape(str(value))}</li>"
-        for label, value in fields
-    )
-    return f"<ul>\n{items}\n</ul>"
+def _format_html_section(
+    heading: str,
+    fields: list[tuple[str, str]] | None = None,
+    *,
+    text: str | None = None,
+    link_label: str | None = None,
+) -> str:
+    """Format one populated HTML section with escaped field values."""
+    if not fields and not text:
+        return ""
+    parts = [f"<h3>{escape(heading)}</h3>"]
+    if fields:
+        rows = []
+        for label, value in fields:
+            display_value = (
+                _format_html_link(value, value)
+                if label == link_label
+                else escape(value).replace("\n", "<br>")
+            )
+            rows.append(
+                f'<tr><th scope="row" width="180" align="left" valign="top" '
+                f'style="width:180px;padding:3px 8px 3px 0;font-weight:normal">{escape(label)}</th>'
+                f'<td width="12" valign="top" style="width:12px;padding:3px 0">:</td>'
+                f'<td valign="top" style="padding:3px 0;word-break:break-word">{display_value}</td></tr>'
+            )
+        parts.append('<table cellpadding="0" cellspacing="0" border="0" width="100%" '
+                     'style="width:100%;border-collapse:collapse;table-layout:fixed">\n'
+                     + "\n".join(rows) + "\n</table>")
+    if text:
+        parts.append(_format_html_paragraph(text))
+    return "\n".join(parts)
 
 
 def _format_paragraph(value: str) -> str:
@@ -567,7 +632,7 @@ def _format_paragraph(value: str) -> str:
     if value == "N/A":
         return value
     paragraphs = [
-        _strip_markdown_emphasis(part.strip())
+        part.strip()
         for part in value.splitlines()
         if part.strip()
     ]
@@ -581,7 +646,7 @@ def _format_html_paragraph(value: str) -> str:
     if value == "N/A":
         return "<p>N/A</p>"
     paragraphs = [
-        _strip_markdown_emphasis(part.strip())
+        part.strip()
         for part in value.splitlines()
         if part.strip()
     ]
@@ -590,14 +655,7 @@ def _format_html_paragraph(value: str) -> str:
     return "\n".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
 
 
-def _strip_markdown_emphasis(value: str) -> str:
-    """Remove bold emphasis markers unsupported by the target display."""
-    return value.replace("**", "")
-
-
 def _format_html_link(url: str, label: str) -> str:
-    """Return an escaped clickable link or N/A when no URL exists."""
-    if url == "N/A":
-        return "N/A"
+    """Return an escaped clickable link."""
     escaped_url = escape(url, quote=True)
     return f'<a href="{escaped_url}">{escape(label)}</a>'

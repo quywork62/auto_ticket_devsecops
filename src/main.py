@@ -33,8 +33,7 @@ class ContextFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Format the base log message and append available context values."""
         fields = {
-            "finding_id": getattr(record, "finding_id", None)
-            or getattr(record, "dedupe_key", None),
+            "finding_id": getattr(record, "finding_id", None),
             "delivery_id": getattr(record, "delivery_id", None),
             "product": getattr(record, "product", None),
             "severity": getattr(record, "severity", None),
@@ -74,7 +73,7 @@ def configure_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the scheduler after deployment migrations have completed."""
+    """Initialize missing tables and start the background scheduler."""
     configure_logging()
     initialize_database()
     settings = get_settings()

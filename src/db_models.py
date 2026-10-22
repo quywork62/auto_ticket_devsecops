@@ -42,7 +42,6 @@ class ProcessingLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     finding_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    dedupe_key: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     email_subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[ProcessingStatus] = mapped_column(
         Enum(ProcessingStatus, name="processing_status"),
@@ -75,7 +74,6 @@ class NotificationDelivery(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     finding_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    dedupe_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     recipient_email: Mapped[str] = mapped_column(String(320), nullable=False)
     cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_subject: Mapped[str] = mapped_column(String(500), nullable=False)

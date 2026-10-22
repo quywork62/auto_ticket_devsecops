@@ -27,29 +27,10 @@ class ProcessingLogRepository:
             select(ProcessingLog).where(ProcessingLog.finding_id == finding_id)
         )
 
-    def get_sent_or_queued_by_dedupe_key(self, dedupe_key: str) -> ProcessingLog | None:
-        """Find the latest sent or queued logical duplicate."""
-        return self.db.scalar(
-            select(ProcessingLog)
-            .where(ProcessingLog.dedupe_key == dedupe_key)
-            .where(
-                ProcessingLog.status.in_(
-                    [ProcessingStatus.SENT, ProcessingStatus.RATE_LIMITED]
-                )
-            )
-            .order_by(ProcessingLog.updated_at.desc())
-            .limit(1)
-        )
-
-    def get_rate_limited_items(self, limit: int = 100) -> list[ProcessingLog]:
-        """Return no legacy rows because retry queue lives in deliveries."""
-        return []
-
     def mark_seen(
         self,
         *,
         finding_id: int,
-        dedupe_key: str,
         priority: str | None = None,
         sla_target: str | None = None,
         sla_due_at: datetime | None = None,
@@ -61,7 +42,6 @@ class ProcessingLogRepository:
             record = ProcessingLog(finding_id=finding_id)
             self.db.add(record)
 
-        record.dedupe_key = dedupe_key
         record.updated_at = now
         self.db.commit()
         self.db.refresh(record)
@@ -76,7 +56,6 @@ class ProcessingLogRepository:
         retry_count: int | None = None,
         error_message: str | None = None,
         processed_at: datetime | None = None,
-        dedupe_key: str | None = None,
         **_: object,
     ) -> ProcessingLog:
         """Create or update one processing row with scoped audit columns."""
@@ -92,8 +71,6 @@ class ProcessingLogRepository:
             record.retry_count = retry_count
         record.error_message = error_message
         record.processed_at = processed_at
-        if dedupe_key is not None:
-            record.dedupe_key = dedupe_key
         record.updated_at = now
         self.db.commit()
         self.db.refresh(record)
@@ -105,7 +82,6 @@ class ProcessingLogRepository:
         finding_id: int,
         email_subject: str,
         retry_count: int,
-        dedupe_key: str | None = None,
         **kwargs: object,
     ) -> ProcessingLog:
         """Mark a finding as sent."""
@@ -116,7 +92,6 @@ class ProcessingLogRepository:
             retry_count=retry_count,
             error_message=None,
             processed_at=utc_now(),
-            dedupe_key=dedupe_key,
             **kwargs,
         )
 
@@ -127,7 +102,6 @@ class ProcessingLogRepository:
         email_subject: str | None,
         retry_count: int,
         error_message: str,
-        dedupe_key: str | None = None,
         **kwargs: object,
     ) -> ProcessingLog:
         """Mark a finding as failed and retain the error for audit."""
@@ -138,7 +112,6 @@ class ProcessingLogRepository:
             retry_count=retry_count,
             error_message=error_message,
             processed_at=utc_now(),
-            dedupe_key=dedupe_key,
             **kwargs,
         )
 
@@ -149,7 +122,6 @@ class ProcessingLogRepository:
         email_subject: str,
         retry_count: int = 0,
         error_message: str = "SMTP rate limit exceeded",
-        dedupe_key: str | None = None,
         **kwargs: object,
     ) -> ProcessingLog:
         """Mark a finding as waiting for queued SMTP delivery."""
@@ -160,7 +132,6 @@ class ProcessingLogRepository:
             retry_count=retry_count,
             error_message=error_message,
             processed_at=None,
-            dedupe_key=dedupe_key,
             **kwargs,
         )
 
@@ -169,7 +140,6 @@ class ProcessingLogRepository:
         *,
         finding_id: int,
         error_message: str,
-        dedupe_key: str | None = None,
         **kwargs: object,
     ) -> ProcessingLog:
         """Record that no valid notification recipient could be resolved."""
@@ -178,7 +148,6 @@ class ProcessingLogRepository:
             status=ProcessingStatus.INVALID_RECIPIENT,
             error_message=error_message,
             processed_at=utc_now(),
-            dedupe_key=dedupe_key,
             **kwargs,
         )
 
@@ -187,7 +156,6 @@ class ProcessingLogRepository:
         *,
         finding_id: int,
         error_message: str,
-        dedupe_key: str | None = None,
         **kwargs: object,
     ) -> ProcessingLog:
         """Record a duplicate that must not send another email."""
@@ -196,7 +164,6 @@ class ProcessingLogRepository:
             status=ProcessingStatus.SKIPPED,
             error_message=error_message,
             processed_at=utc_now(),
-            dedupe_key=dedupe_key,
             **kwargs,
         )
 
@@ -205,6 +172,30 @@ class NotificationDeliveryRepository:
 
     def __init__(self, db: Session):
         self.db = db
+
+    def sync_processing_status(self, finding_id: int) -> None:
+        """Derive finding state from all recipients, never the last recipient."""
+        rows = list(self.db.scalars(select(NotificationDelivery).where(
+            NotificationDelivery.finding_id == finding_id
+        )))
+        if not rows:
+            return
+        states = {row.status for row in rows}
+        if states & {NotificationStatus.PENDING, NotificationStatus.RETRY_PENDING}:
+            status = ProcessingStatus.RATE_LIMITED
+            message = "Waiting for notification deliveries"
+        elif NotificationStatus.FAILED in states:
+            status = ProcessingStatus.FAILED
+            message = "One or more notification deliveries failed"
+        else:
+            status = ProcessingStatus.SENT
+            message = None
+        ProcessingLogRepository(self.db).upsert_status(
+            finding_id=finding_id, status=status, email_subject=rows[0].email_subject,
+            retry_count=max(row.retry_count for row in rows),
+            error_message=message,
+            processed_at=utc_now() if status != ProcessingStatus.RATE_LIMITED else None,
+        )
 
     def enqueue(self, payload: EmailPayload) -> NotificationDelivery:
         """Create an idempotent delivery row for one finding and recipient."""
@@ -219,7 +210,6 @@ class NotificationDeliveryRepository:
         if existing is None:
             existing = NotificationDelivery(
                 finding_id=payload.finding_id,
-                dedupe_key=payload.dedupe_key or "",
                 recipient_email=recipient,
                 cc_emails=cc_emails,
                 email_subject=payload.subject,
@@ -262,24 +252,26 @@ class NotificationDeliveryRepository:
             statement = statement.where(NotificationDelivery.finding_id == finding_id)
         return list(self.db.scalars(statement))
 
-    def acquire(
+    def touch_due(
         self,
         *,
         delivery_id: int,
-        worker_id: str,
-        lease_seconds: int,
     ) -> bool:
-        """Mark one due delivery as being handled by this single app instance."""
+        """Recheck eligibility in a single replica; this is not a lock or lease."""
         result = self.db.execute(
             update(NotificationDelivery)
             .where(NotificationDelivery.id == delivery_id)
-            .where(NotificationDelivery.status != NotificationStatus.SENT)
+            .where(NotificationDelivery.status.in_([
+                NotificationStatus.PENDING, NotificationStatus.RETRY_PENDING
+            ]))
+            .where(or_(NotificationDelivery.next_attempt_at.is_(None),
+                       NotificationDelivery.next_attempt_at <= utc_now()))
             .values(updated_at=utc_now())
         )
         self.db.commit()
         return result.rowcount == 1
 
-    def mark_sent(self, delivery_id: int, worker_id: str) -> None:
+    def mark_sent(self, delivery_id: int) -> None:
         """Mark a notification as delivered."""
         now = utc_now()
         self.db.execute(
@@ -298,7 +290,6 @@ class NotificationDeliveryRepository:
         self,
         *,
         delivery_id: int,
-        worker_id: str,
         retry_count: int,
         next_attempt_at: datetime,
         error_message: str,
@@ -320,7 +311,6 @@ class NotificationDeliveryRepository:
         self,
         *,
         delivery_id: int,
-        worker_id: str,
         retry_count: int,
         error_message: str,
     ) -> None:
@@ -363,10 +353,6 @@ class SmtpRateLimitRepository:
         hour_count = self.count_since(now - timedelta(hours=1))
         return minute_count, hour_count
 
-    def record_send(self, **_: object) -> None:
-        """No-op: successful sends are audited by notification_deliveries.sent_at."""
-        return None
-
 
 class SmtpRateLimiter:
     """Apply per-minute and per-hour quotas using notification deliveries."""
@@ -385,7 +371,3 @@ class SmtpRateLimiter:
         """Return whether both configured SMTP quotas allow another send."""
         minute_count, hour_count = self.repository.current_counts()
         return minute_count < self.max_per_minute and hour_count < self.max_per_hour
-
-    def record_send(self, **kwargs: object) -> None:
-        """Keep call sites simple; send audit is stored by NotificationDelivery."""
-        self.repository.record_send(**kwargs)

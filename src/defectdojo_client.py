@@ -1,7 +1,7 @@
 """Fetch and normalize active, verified findings from the DefectDojo API."""
 
 import logging
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, parse_qs
 
 import requests
 
@@ -20,6 +20,7 @@ class DefectDojoClient:
         self._test_cache: dict[int, dict] = {}
         self._engagement_cache: dict[int, dict] = {}
         self._product_cache: dict[int, dict] = {}
+        self._test_type_cache: dict[int, dict] = {}
 
     def fetch_active_verified_findings(
         self, product_names: list[str] | None = None
@@ -62,8 +63,16 @@ class DefectDojoClient:
         limit = self.settings.defectdojo_findings_limit
         offset = 0
         next_url: str | None = self._findings_url()
+        visited: set[tuple[str, int]] = set()
 
         while next_url:
+            next_url = self._safe_page_url(next_url)
+            page_offset = int(parse_qs(urlsplit(next_url).query).get("offset", [offset])[0])
+            page_key = (next_url, page_offset)
+            if page_key in visited:
+                raise ValueError("DefectDojo pagination repeated a page")
+            visited.add(page_key)
+            offset = page_offset
             logger.debug("DefectDojo findings page request started")
             response = requests.get(
                 next_url,
@@ -80,7 +89,10 @@ class DefectDojoClient:
                     else None
                 ),
                 timeout=self.settings.defectdojo_request_timeout_seconds,
+                allow_redirects=False,
             )
+            if 300 <= response.status_code < 400:
+                raise ValueError("DefectDojo API redirects are not allowed")
             response.raise_for_status()
             payload = response.json()
 
@@ -100,6 +112,16 @@ class DefectDojoClient:
                 next_url = None
 
         return findings
+
+    def _safe_page_url(self, value: str) -> str:
+        """Never forward the API token to another origin or resource."""
+        url = urljoin(self._findings_url(), value)
+        expected, actual = urlsplit(self._findings_url()), urlsplit(url)
+        if (actual.scheme, actual.hostname, actual.port, actual.path) != (
+            expected.scheme, expected.hostname, expected.port, expected.path
+        ) or actual.username or actual.password or actual.fragment:
+            raise ValueError("Unsafe DefectDojo pagination URL")
+        return url
 
     def _headers(self) -> dict[str, str]:
         """Build DefectDojo token-authentication headers."""
@@ -172,19 +194,47 @@ class DefectDojoClient:
             description=raw.get("description"),
             impact=raw.get("impact"),
             mitigation=raw.get("mitigation"),
+            active=raw.get("active"),
+            verified=raw.get("verified"),
             product=product_name,
             endpoint=", ".join(endpoints) if endpoints else None,
             date=raw.get("date"),
             ticket_email=raw.get("ticket_email"),
-            scanner_type=self._string_or_none(raw.get("scanner_type") or raw.get("test_type")),
+            scanner_type=self._resolve_scanner_type(raw),
+            category=self._string_or_none(raw.get("category")),
             cwe=raw.get("cwe"),
             cve=self._first_value(raw.get("cve") or raw.get("vulnerability_ids")),
+            vuln_id_from_tool=self._string_or_none(raw.get("vuln_id_from_tool")),
+            epss_score=raw.get("epss_score"),
             rule_id=self._string_or_none(raw.get("rule_id") or raw.get("unique_id_from_tool")),
             file_path=self._string_or_none(raw.get("file_path") or raw.get("file")),
             line=self._int_or_none(raw.get("line") or raw.get("line_number")),
             component_name=self._string_or_none(raw.get("component_name") or raw.get("component")),
             component_version=self._string_or_none(raw.get("component_version")),
-            parameter=self._string_or_none(raw.get("parameter")),
+            fixed_version=self._string_or_none(
+                raw.get("fixed_version")
+                or raw.get("fix_version")
+                or raw.get("planned_remediation_version")
+            ),
+            cvss_score=(
+                raw["cvssv3_score"]
+                if raw.get("cvssv3_score") is not None
+                else raw.get("cvss_score")
+            ),
+            repository=self._string_or_none(raw.get("repository") or raw.get("repo")),
+            secret_type=self._string_or_none(raw.get("secret_type")),
+            fingerprint=self._string_or_none(
+                raw.get("fingerprint")
+                or raw.get("hash_code")
+                or raw.get("unique_id_from_tool")
+            ),
+            container_image=self._string_or_none(
+                raw.get("container_image") or raw.get("image_name")
+            ),
+            http_method=self._string_or_none(
+                raw.get("http_method") or raw.get("method")
+            ),
+            parameter=self._string_or_none(raw.get("parameter") or raw.get("param")),
             resource=self._string_or_none(
                 raw.get("resource")
                 or raw.get("resource_id")
@@ -219,6 +269,39 @@ class DefectDojoClient:
             if value:
                 endpoints.append(value)
         return endpoints
+
+    def _resolve_scanner_type(self, raw: dict) -> str | None:
+        """Resolve the scanner name from inline data or DefectDojo Test Type IDs."""
+        for value in (
+            raw.get("scanner_type"),
+            raw.get("test_type"),
+            raw.get("found_by"),
+        ):
+            candidates = value if isinstance(value, list) else [value]
+            for candidate in candidates:
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+                if isinstance(candidate, dict):
+                    name = candidate.get("name")
+                    if isinstance(name, str) and name.strip():
+                        return name.strip()
+                test_type_id = self._extract_id(candidate)
+                if test_type_id is None:
+                    continue
+                try:
+                    if test_type_id not in self._test_type_cache:
+                        self._test_type_cache[test_type_id] = self._get_json(
+                            f"api/v2/test_types/{test_type_id}/"
+                        )
+                    name = self._test_type_cache[test_type_id].get("name")
+                    if isinstance(name, str) and name.strip():
+                        return name.strip()
+                except requests.RequestException as error:
+                    logger.warning(
+                        "Could not resolve DefectDojo Test Type",
+                        extra={"test_type_id": test_type_id, "error_message": str(error)},
+                    )
+        return None
 
     def _resolve_product_name(self, raw: dict) -> str | None:
         """Resolve product name directly or through test and engagement links."""

@@ -29,18 +29,30 @@ class DefectDojoFinding(BaseModel):
     description: str | None = None
     impact: str | None = None
     mitigation: str | None = None
+    active: bool | None = None
+    verified: bool | None = None
     product: str | None = None
     endpoint: str | None = None
     date: date | str | None = None
     ticket_email: str | None = None
     scanner_type: str | None = None
+    category: str | None = None
     cwe: str | int | None = None
     cve: str | None = None
+    vuln_id_from_tool: str | None = None
+    epss_score: float | None = None
     rule_id: str | None = None
     file_path: str | None = None
     line: int | None = None
     component_name: str | None = None
     component_version: str | None = None
+    fixed_version: str | None = None
+    cvss_score: str | float | None = None
+    repository: str | None = None
+    secret_type: str | None = None
+    fingerprint: str | None = None
+    container_image: str | None = None
+    http_method: str | None = None
     parameter: str | None = None
     resource: str | None = None
     resource_type: str | None = None
@@ -59,7 +71,6 @@ class EmailPayload(BaseModel):
     subject: str
     body: str
     html_body: str | None = None
-    dedupe_key: str | None = None
     priority: str | None = None
     sla_target: str | None = None
     ticket_action: TicketAction = TicketAction.CREATE
@@ -70,7 +81,7 @@ class ProjectEmailMapping(BaseModel):
 
     product_name: str
     subject_prefix: str | None = None
-    subject_product_name: str | None = None
+    display_name: str | None = None
     to_destinations: list[EmailStr] = Field(default_factory=list)
     cc_destinations: list[EmailStr] = Field(default_factory=list)
 

@@ -2,8 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from datetime import timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -11,10 +10,9 @@ from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
 from config import Settings
-from dedupe import build_dedupe_key
 from defectdojo_client import DefectDojoClient
 from email_template import build_ticket_content
-from db_models import NotificationDelivery, ProcessingLog, ProcessingStatus, utc_now
+from db_models import NotificationDelivery, ProcessingStatus, utc_now
 from repositories import (
     NotificationDeliveryRepository,
     ProcessingLogRepository,
@@ -30,34 +28,10 @@ from schemas import (
     TicketAction,
 )
 from smtp_client import SmtpClient, is_transient_smtp_error, retry_delay_seconds
+from sla import policy_for_severity
 
 logger = logging.getLogger(__name__)
 email_adapter = TypeAdapter(EmailStr)
-
-SLA_BY_SEVERITY = {
-    "critical": ("P1/Critical", timedelta(days=7), "7 days"),
-    "high": ("P2/High", timedelta(days=14), "14 days"),
-    "medium": ("P3/Medium", timedelta(days=30), "30 days"),
-    "low": ("P4/Low", timedelta(days=90), "60 - 90 days"),
-    "informational": ("P5/Info", None, "Best effort"),
-    "info": ("P5/Info", None, "Best effort"),
-}
-
-
-def policy_for_severity(severity: str) -> SlaPolicy:
-    """Return internal priority/SLA metadata for notification email audit."""
-    normalized = severity.strip().lower()
-    priority, delta, target = SLA_BY_SEVERITY.get(
-        normalized, ("P5/Info", None, "Best effort")
-    )
-    now = datetime.now(timezone.utc)
-    return SlaPolicy(
-        severity=severity,
-        priority=priority,
-        target=target,
-        due_at=now + delta if delta else None,
-    )
-
 
 def missing_ticket_fields(finding: DefectDojoFinding) -> list[str]:
     """Return important fields missing for the detected finding type."""
@@ -101,7 +75,6 @@ class FindingProcessor:
         self.settings = settings
         self.processing_logs = ProcessingLogRepository(db)
         self.notification_deliveries = NotificationDeliveryRepository(db)
-        self.worker_id = str(uuid4())
         self.rate_limiter = SmtpRateLimiter(
             SmtpRateLimitRepository(db),
             settings.smtp_max_emails_per_minute,
@@ -113,7 +86,7 @@ class FindingProcessor:
         self._reload_project_email_mapping()
 
     def _log_missing_finding_fields(
-        self, finding: DefectDojoFinding, dedupe_key: str
+        self, finding: DefectDojoFinding
     ) -> None:
         """Log optional finding fields that reduce ticket investigation quality."""
         missing_fields = missing_ticket_fields(finding)
@@ -124,7 +97,6 @@ class FindingProcessor:
             "Finding missing recommended fields before ticket sync",
             extra={
                 "finding_id": finding.finding_id,
-                "dedupe_key": dedupe_key,
                 "product": finding.product,
                 "severity": finding.severity,
                 "missing_fields": ",".join(missing_fields),
@@ -162,18 +134,12 @@ class FindingProcessor:
             },
         )
 
-    def process_rate_limited_queue(self) -> None:
-        """Kept for compatibility; notification retry lives in notification_deliveries."""
-        return None
-
     def process_finding(self, finding: DefectDojoFinding) -> int:
         """Process one finding through dedupe and the configured delivery mode."""
-        dedupe_key = build_dedupe_key(finding)
         sla_policy = policy_for_severity(finding.severity)
-        self._log_missing_finding_fields(finding, dedupe_key)
+        self._log_missing_finding_fields(finding)
         return self._process_claimed_finding(
             finding=finding,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
         )
 
@@ -181,58 +147,22 @@ class FindingProcessor:
         self,
         *,
         finding: DefectDojoFinding,
-        dedupe_key: str,
         sla_policy: SlaPolicy,
     ) -> int:
         """Process a finding after checking existing processing logs."""
         existing = self.processing_logs.get_by_finding_id(finding.finding_id)
-        dedupe_duplicate = self.processing_logs.get_sent_or_queued_by_dedupe_key(
-            dedupe_key
-        )
-
         self.processing_logs.mark_seen(
             finding_id=finding.finding_id,
-            dedupe_key=dedupe_key,
             priority=sla_policy.priority,
             sla_target=sla_policy.target,
             sla_due_at=sla_policy.due_at,
         )
-
-        duplicate_record = self._select_duplicate_record(existing, dedupe_duplicate)
-        if duplicate_record and duplicate_record.status == ProcessingStatus.SENT:
-            if not existing or existing.status != ProcessingStatus.SENT:
-                self.processing_logs.mark_skipped(
-                    finding_id=finding.finding_id,
-                    error_message=(
-                        "Duplicate issue skipped because dedupe_key already has "
-                        f"SENT finding_id={duplicate_record.finding_id}"
-                    ),
-                    dedupe_key=dedupe_key,
-                    priority=sla_policy.priority,
-                    sla_target=sla_policy.target,
-                    sla_due_at=sla_policy.due_at,
-                )
+        if existing and existing.status in (
+            ProcessingStatus.SENT, ProcessingStatus.RATE_LIMITED
+        ):
             logger.debug(
-                "Duplicate skipped",
-                extra={
-                    "finding_id": finding.finding_id,
-                    "dedupe_key": dedupe_key,
-                    "existing_finding_id": duplicate_record.finding_id,
-                    "product": finding.product,
-                    "severity": finding.severity,
-                    "status": ProcessingStatus.SKIPPED.value,
-                },
-            )
-            return 0
-
-        if duplicate_record and duplicate_record.status == ProcessingStatus.RATE_LIMITED:
-            logger.debug(
-                "Finding already queued due to rate limit",
-                extra={
-                    "finding_id": finding.finding_id,
-                    "dedupe_key": dedupe_key,
-                    "status": ProcessingStatus.RATE_LIMITED.value,
-                },
+                "Finding already sent or queued; skipping",
+                extra={"finding_id": finding.finding_id, "status": existing.status.value},
             )
             return 0
 
@@ -240,32 +170,15 @@ class FindingProcessor:
         project_mapping = self._resolve_project_mapping(finding)
         return self._process_notification_email(
             finding=finding,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
             project_mapping=project_mapping,
         )
 
-    def _select_duplicate_record(
-        self,
-        existing: ProcessingLog | None,
-        dedupe_duplicate: ProcessingLog | None,
-    ) -> ProcessingLog | None:
-        """Choose the record that determines whether processing must stop."""
-        if existing and existing.status in (
-            ProcessingStatus.SENT,
-            ProcessingStatus.RATE_LIMITED,
-        ):
-            return existing
-        if dedupe_duplicate:
-            return dedupe_duplicate
-        return existing
-
     def _process_notification_email(
         self,
         *,
         finding: DefectDojoFinding,
-        dedupe_key: str,
         sla_policy: SlaPolicy,
         ticket_action: TicketAction,
         project_mapping: ProjectEmailMapping | None,
@@ -276,7 +189,6 @@ class FindingProcessor:
             self.processing_logs.mark_invalid_recipient(
                 finding_id=finding.finding_id,
                 error_message="No notification recipients configured for product",
-                dedupe_key=dedupe_key,
                 priority=sla_policy.priority,
                 sla_target=sla_policy.target,
                 sla_due_at=sla_policy.due_at,
@@ -285,7 +197,6 @@ class FindingProcessor:
                 "Notification-only finding skipped because no recipients matched",
                 extra={
                     "finding_id": finding.finding_id,
-                    "dedupe_key": dedupe_key,
                     "product": finding.product,
                     "severity": finding.severity,
                     "status": ProcessingStatus.INVALID_RECIPIENT.value,
@@ -295,7 +206,6 @@ class FindingProcessor:
 
         self._enqueue_notification_emails(
             finding=finding,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
             project_mapping=project_mapping,
@@ -307,7 +217,6 @@ class FindingProcessor:
                 project_mapping,
                 to_recipients[0],
             ),
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
             project_mapping=project_mapping,
@@ -317,7 +226,6 @@ class FindingProcessor:
             status=ProcessingStatus.PENDING,
             email_subject=audit_payload.subject,
             retry_count=0,
-            dedupe_key=dedupe_key,
         )
         sent_email_count = self.process_notification_queue(finding_id=finding.finding_id)
         return 1 if sent_email_count > 0 else 0
@@ -327,7 +235,6 @@ class FindingProcessor:
         *,
         finding: DefectDojoFinding,
         recipient: str,
-        dedupe_key: str,
         sla_policy: SlaPolicy,
         ticket_action: TicketAction,
         project_mapping: ProjectEmailMapping | None = None,
@@ -338,14 +245,13 @@ class FindingProcessor:
         content = build_ticket_content(
             finding,
             self.settings.defectdojo_base_url,
-            dedupe_key=dedupe_key,
             sla_policy=sla_policy,
             ticket_action=ticket_action,
             subject_prefix=(
                 project_mapping.subject_prefix if project_mapping else None
             ),
-            subject_product_name=(
-                project_mapping.subject_product_name if project_mapping else None
+            subject_product=(
+                project_mapping.display_name if project_mapping else None
             ),
         )
         return EmailPayload(
@@ -356,7 +262,6 @@ class FindingProcessor:
             subject=content.subject,
             body=content.body,
             html_body=content.html_body,
-            dedupe_key=content.dedupe_key,
             priority=content.priority,
             sla_target=content.sla_target,
             ticket_action=content.ticket_action,
@@ -366,7 +271,6 @@ class FindingProcessor:
         self,
         *,
         finding: DefectDojoFinding,
-        dedupe_key: str,
         sla_policy: SlaPolicy,
         ticket_action: TicketAction,
         project_mapping: ProjectEmailMapping | None,
@@ -378,7 +282,6 @@ class FindingProcessor:
                 "Notification email skipped because no to_destinations are configured",
                 extra={
                     "finding_id": finding.finding_id,
-                    "dedupe_key": dedupe_key,
                     "flow_type": "notify_email",
                 },
             )
@@ -392,7 +295,6 @@ class FindingProcessor:
                     project_mapping,
                     recipient,
                 ),
-                dedupe_key=dedupe_key,
                 sla_policy=sla_policy,
                 ticket_action=ticket_action,
                 project_mapping=project_mapping,
@@ -400,16 +302,15 @@ class FindingProcessor:
             self.notification_deliveries.enqueue(payload)
 
     def process_notification_queue(self, finding_id: int | None = None) -> int:
-        """Send due notification deliveries with database-backed retry leases."""
+        """Send due deliveries; this service requires a single app replica."""
         sent_count = 0
         for delivery in self.notification_deliveries.get_due(finding_id=finding_id):
             if not self.rate_limiter.quota_available():
+                self.notification_deliveries.sync_processing_status(delivery.finding_id)
                 logger.warning("Notification queue paused because SMTP quota is active")
                 break
-            if not self.notification_deliveries.acquire(
+            if not self.notification_deliveries.touch_due(
                 delivery_id=delivery.id,
-                worker_id=self.worker_id,
-                lease_seconds=self.settings.notification_lease_ttl_seconds,
             ):
                 continue
             if self._deliver_notification(delivery):
@@ -417,43 +318,17 @@ class FindingProcessor:
         return sent_count
 
     def _deliver_notification(self, delivery: NotificationDelivery) -> bool:
-        """Attempt one leased notification and persist its next state."""
+        """Attempt one notification and persist its next state."""
         payload = EmailPayload(
             finding_id=delivery.finding_id,
             recipient_email=delivery.recipient_email,
             cc_emails=self._parse_stored_email_list(delivery.cc_emails),
             subject=delivery.email_subject,
             body=delivery.email_body,
-            dedupe_key=delivery.dedupe_key,
             ticket_action=TicketAction.CREATE,
         )
         try:
             self.smtp_client.send(payload)
-            self.rate_limiter.record_send(
-                finding_id=payload.finding_id,
-                recipient_email=str(payload.recipient_email),
-                cc_emails=delivery.cc_emails,
-                flow_type="notify_email",
-            )
-            self.notification_deliveries.mark_sent(delivery.id, self.worker_id)
-            self.processing_logs.mark_sent(
-                finding_id=payload.finding_id,
-                email_subject=payload.subject,
-                retry_count=delivery.retry_count,
-                dedupe_key=payload.dedupe_key,
-            )
-            logger.info(
-                "Notification email sent successfully",
-                extra={
-                    "finding_id": payload.finding_id,
-                    "delivery_id": delivery.id,
-                    "dedupe_key": payload.dedupe_key,
-                    "recipient_email": str(payload.recipient_email),
-                    "cc_emails": delivery.cc_emails,
-                    "status": ProcessingStatus.SENT.value,
-                },
-            )
-            return True
         except Exception as error:
             retry_count = delivery.retry_count + 1
             error_message = str(error)
@@ -463,38 +338,22 @@ class FindingProcessor:
             ):
                 self.notification_deliveries.mark_retry(
                     delivery_id=delivery.id,
-                    worker_id=self.worker_id,
                     retry_count=retry_count,
                     next_attempt_at=self._next_retry_at(retry_count),
                     error_message=error_message,
                 )
-                self.processing_logs.mark_rate_limited(
-                    finding_id=payload.finding_id,
-                    email_subject=payload.subject,
-                    retry_count=retry_count,
-                    error_message=error_message,
-                    dedupe_key=payload.dedupe_key,
-                )
             else:
                 self.notification_deliveries.mark_failed(
                     delivery_id=delivery.id,
-                    worker_id=self.worker_id,
                     retry_count=retry_count,
                     error_message=error_message,
                 )
-                self.processing_logs.mark_failed(
-                    finding_id=payload.finding_id,
-                    email_subject=payload.subject,
-                    retry_count=retry_count,
-                    error_message=error_message,
-                    dedupe_key=payload.dedupe_key,
-                )
+            self.notification_deliveries.sync_processing_status(delivery.finding_id)
             logger.warning(
                 "Notification delivery failed",
                 extra={
                     "finding_id": delivery.finding_id,
                     "delivery_id": delivery.id,
-                    "dedupe_key": delivery.dedupe_key,
                     "recipient_email": delivery.recipient_email,
                     "flow_type": "notify_email",
                     "retry_count": retry_count,
@@ -502,6 +361,20 @@ class FindingProcessor:
                 },
             )
             return False
+
+        # SMTP succeeded. Persistence failures must not enter transport retry.
+        try:
+            self.notification_deliveries.mark_sent(delivery.id)
+            self.notification_deliveries.sync_processing_status(delivery.finding_id)
+        except Exception:
+            logger.error(
+                "SMTP accepted email but delivery audit failed; stop cycle and reconcile",
+                extra={"finding_id": delivery.finding_id, "delivery_id": delivery.id},
+            )
+            raise
+        logger.info("Notification email sent successfully",
+                    extra={"finding_id": delivery.finding_id, "delivery_id": delivery.id})
+        return True
 
     def _next_retry_at(self, attempt_number: int):
         """Calculate when a queued SMTP delivery becomes eligible again."""
@@ -562,12 +435,6 @@ class FindingProcessor:
             recipients.append(valid_destination)
         return recipients
 
-    def _payload_to_recipients(self, payload: EmailPayload) -> list[str]:
-        """Return all unique To recipients represented by an email payload."""
-        return self._dedupe_email_values(
-            [str(payload.recipient_email), *[str(email) for email in payload.to_emails]]
-        )
-
     def _dedupe_email_values(self, values: list[EmailStr] | list[str]) -> list[str]:
         """Validate addresses and remove case-insensitive duplicates."""
         recipients: list[str] = []
@@ -582,12 +449,6 @@ class FindingProcessor:
             seen.add(normalized)
             recipients.append(valid_value)
         return recipients
-
-    def _format_email_list(self, values: list[EmailStr] | list[str]) -> str | None:
-        """Serialize an email list for database audit columns."""
-        if not values:
-            return None
-        return ",".join(str(value) for value in values)
 
     def _validate_email(self, value: str | None) -> str | None:
         """Return a normalized email address or None when invalid."""
@@ -604,13 +465,12 @@ class FindingProcessor:
 
         if self.settings.project_email_mapping_file:
             path = Path(self.settings.project_email_mapping_file)
-            if path.exists():
-                file_mapping = ProjectEmailMappingConfig.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-                for project in file_mapping.projects:
-                    key, normalized_project = self._normalize_project_mapping(project)
-                    merged[key] = normalized_project
+            file_mapping = ProjectEmailMappingConfig.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+            for project in file_mapping.projects:
+                key, normalized_project = self._normalize_project_mapping(project)
+                merged[key] = normalized_project
 
         if self.settings.project_email_mapping_json:
             raw_mapping = json.loads(self.settings.project_email_mapping_json)
@@ -624,34 +484,25 @@ class FindingProcessor:
     def _normalize_project_mapping(
         self, project: ProjectEmailMapping
     ) -> tuple[str, ProjectEmailMapping]:
-        """Split product_name as defectdojo_product:subject_product when configured."""
-        match_product, subject_product_name = self._split_mapping_product_name(
-            project.product_name
-        )
-        normalized_subject_product = (
-            project.subject_product_name or subject_product_name
-        )
+        """Keep legacy product aliases readable while routing by product name."""
+        match_product = self._split_mapping_product_name(project.product_name)
         normalized_project = project.model_copy(
             update={
                 "product_name": match_product,
-                "subject_product_name": normalized_subject_product,
+                "display_name": project.display_name or (
+                    project.product_name.split(":", 1)[1].strip()
+                    if ":" in project.product_name else None
+                ),
             }
         )
         return match_product.lower(), normalized_project
 
-    def _split_mapping_product_name(self, product_name: str) -> tuple[str, str | None]:
-        """Return DefectDojo product key and optional subject product alias."""
+    def _split_mapping_product_name(self, product_name: str) -> str:
+        """Return the DefectDojo product key from a legacy aliased mapping."""
         raw_product_name = product_name.strip()
         if ":" not in raw_product_name:
-            return raw_product_name, None
-
-        match_product, subject_product_name = raw_product_name.split(":", 1)
-        match_product = match_product.strip()
-        subject_product_name = subject_product_name.strip()
-        return (
-            match_product or raw_product_name,
-            subject_product_name or None,
-        )
+            return raw_product_name
+        return raw_product_name.split(":", 1)[0].strip() or raw_product_name
 
     def _reload_project_email_mapping(self) -> bool:
         """Reload product mapping and keep the last good config on failure."""

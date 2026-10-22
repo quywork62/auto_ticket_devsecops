@@ -4,6 +4,24 @@ Dịch vụ tự động lấy security findings từ DefectDojo, chống gửi 
 
 ## Chức năng chính
 
+### Giới hạn vận hành sau refactor
+
+Chạy một app replica; chưa có distributed lock. Finding chỉ `SENT` khi tất cả
+delivery thành công; còn delivery chờ thì trạng thái `RATE_LIMITED`, hết chờ
+nhưng có delivery lỗi thì `FAILED`. FAILED là terminal, không tự reset retry.
+Lỗi DB sau SMTP thành công dừng cycle, không bị coi là SMTP retry; cần kiểm tra
+delivery/log vì vẫn có khả năng gửi trùng sau restart hoặc cycle kế tiếp.
+HTML hiện chưa được lưu qua queue nên email thực tế là plain text.
+Cấu hình timeout/interval/quota/attempt phải dương, port 1–65535 và sender phải
+là email hợp lệ. Biến lease TTL cũ không còn hiệu lực. Phân trang findings chỉ
+chấp nhận cùng origin/path, không theo redirect hay trang lặp.
+
+Test an toàn, không đọc `.env` và không gửi email:
+
+```bash
+PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests -v
+```
+
 - Lấy các finding đang `active=true` và `verified=true` từ DefectDojo API.
 - Chỉ lấy finding của các product được khai báo trong project mapping.
 - Hỗ trợ phân trang khi DefectDojo trả về nhiều kết quả.
@@ -41,7 +59,6 @@ Devsecops_auto_ticket/
 │   ├── scheduler.py             # Chạy tác vụ lấy findings theo chu kỳ
 │   ├── processor.py             # Điều phối dedupe, tạo email và gửi email
 │   ├── defectdojo_client.py     # Gọi Products API và Findings API của DefectDojo
-│   ├── dedupe.py                # Tạo khóa chống trùng từ finding_id
 │   ├── email_template.py        # Tạo tiêu đề, nội dung text và HTML của email
 │   ├── redaction.py             # Che token, mật khẩu và dữ liệu nhạy cảm
 │   ├── smtp_client.py           # Kết nối SMTP, gửi email và phân loại lỗi retry
@@ -64,6 +81,27 @@ Devsecops_auto_ticket/
 ```
 
 ## Luồng xử lý
+
+### Chống trùng theo finding ID
+
+Chống trùng dùng trực tiếp `finding_id`; giữ unique theo finding và cặp
+`(finding_id, recipient_email)`. Không còn module `dedupe.py` hoặc cột
+`dedupe_key` trong hai model. Các file migration đã được bỏ theo yêu cầu.
+Database hiện hữu cần được chỉnh schema riêng trước khi chạy code mới;
+`create_all()` và TRUNCATE không xóa các cột cũ. Không có thay đổi database
+thật được thực hiện trong bước chỉnh source này.
+
+### Remediation SLA KPI
+
+Chính sách duy nhất ở `src/sla.py` (`SLA_BY_SEVERITY`): Critical 4 hours,
+High 24 hours, Medium 7 days, Low 30 days. Info/Informational và severity không
+nhận diện dùng Best effort, không có due date. Deadline hiển thị
+`YYYY-MM-DD HH:MM` theo `Asia/Ho_Chi_Minh` trong text và HTML.
+Để thay KPI, chỉ sửa bảng này và test SLA tương ứng; schema/template không tự
+tính thời lượng. Runtime vẫn tính từ lúc processor xử lý finding, không từ
+timestamp tạo DefectDojo (chưa có timestamp đó trong mapping hiện tại).
+Email đã lưu queue không được tự tính lại deadline. Các mẫu Word/JSON và
+preview trước đây là dữ liệu lịch sử, không phải chính sách SLA đang chạy.
 
 ```text
 1. FastAPI khởi động và kiểm tra/khởi tạo các bảng database.
@@ -113,7 +151,7 @@ Cập nhật `config/project_mapping.local.json`. File này bị Git và Docker 
 {
   "projects": [
     {
-      "product_name": "payment-api:Payment API",
+      "product_name": "payment-api",
       "to_destinations": ["payment-team@example.com"],
       "cc_destinations": ["security@example.com"]
     }
@@ -121,11 +159,22 @@ Cập nhật `config/project_mapping.local.json`. File này bị Git và Docker 
 }
 ```
 
-Với cú pháp `defectdojo-product:display-name`:
+`product_name` phải khớp tên Product trong DefectDojo. Mapping cũ dạng
+`defectdojo-product:display-name` vẫn được đọc; alias được dùng trong subject.
+Có thể khai báo `display_name` riêng, ưu tiên hơn alias. Nếu không có alias,
+subject dùng tên product từ DefectDojo:
+`[DEVSECOPS] [High] [product] - FindingID: 3679 - Finding title`.
+Có thể đổi prefix bằng `subject_prefix` trong mapping.
 
-- Phần trước dấu `:` là tên product dùng để tìm trên DefectDojo.
-- Phần sau dấu `:` là tên project hiển thị trong email subject.
-- Nếu không cần alias, chỉ khai báo `"product_name": "payment-api"`.
+Email rút gọn theo 5 scanner; xem `EMAIL_TEMPLATE_PREVIEWS.md` với 12 mẫu từ
+tài liệu. SonarQube lấy message/rule/location thay vì flows; Gitleaks không đưa
+Secret/Match vào description; Dependency-Check lấy filepath và Impact ghi rõ;
+Trivy lấy target/fixed version; ZAP giữ mô tả và mitigation có giới hạn.
+Không hiện CWE-0, fingerprint, Impact/Action trống hoặc footer boilerplate.
+Description giới hạn 600 ký tự, Impact/Action 450 ký tự trước dấu báo rút gọn.
+Plain text căn nhãn 20 ký tự; HTML dùng các cột có chiều rộng thống nhất.
+Queue hiện vẫn chỉ lưu plain text. Email client dùng font tỷ lệ có thể hiển thị
+khoảng trắng không đều dù dấu hai chấm ở cùng vị trí ký tự.
 
 ### 3. Build và chạy
 
@@ -239,13 +288,6 @@ Nếu response finding không chứa trực tiếp product name, client có th�
 1. **Trong một lần fetch:** `seen_finding_ids` loại các finding có cùng ID khỏi danh sách trả về.
 2. **Processing log:** bảng `processing_logs` chỉ có một bản ghi cho mỗi `finding_id`; finding đã `SENT` sẽ không được gửi lại.
 3. **Delivery queue:** bảng `notification_deliveries` chỉ có một bản ghi cho mỗi cặp `(finding_id, recipient_email)`.
-
-Dedupe key hiện tại là chuỗi của `finding_id`:
-
-```text
-finding_id = 1234
- dedupe_key = "1234"
-```
 
 Cơ chế này chống gửi lại cùng một DefectDojo finding ID. Nếu cùng một lỗ hổng được tạo lại với ID mới, ứng dụng sẽ xem đó là finding mới.
 

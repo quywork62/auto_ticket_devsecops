@@ -4,7 +4,11 @@
 .env
 .env.*
 __pycache__
+**/__pycache__
 *.pyc
+**/*.pyc
+*.pyo
+**/*.pyo
 .pytest_cache
 .DS_Store
 *.md
@@ -20,3 +24,11 @@ alembic
 scripts
 logs
 *.log
+exports
+**/exports
+*.csv
+**/*.csv
+*.xlsx
+**/*.xlsx
+*.docx
+**/*.docx

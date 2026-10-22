@@ -1,13 +1,11 @@
 {
-    "projects": [
-        {
-            "product_name": "payment-api:Payment API",
-            "to_destinations": [
-                "payment-team@example.com"
-            ],
-            "cc_destinations": [
-                "security@example.com"
-            ]
-        }
-    ]
+  "projects": [
+    {
+      "product_name": "example-product",
+      "display_name": "Example Project",
+      "subject_prefix": "DEVSECOPS",
+      "to_destinations": ["developers@example.com"],
+      "cc_destinations": ["security@example.com"]
+    }
+  ]
 }
